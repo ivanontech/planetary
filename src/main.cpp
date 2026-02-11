@@ -189,7 +189,7 @@ void computeAlbumOrbits(ArtistNode& node, const ArtistData& artistData, int arti
         orbitOffset += amt;
         orbit.radius = orbitOffset;
         orbit.angle = (float)albumIdx * 0.618f * (float)M_PI * 2.0f;
-        orbit.speed = 0.15f / sqrtf(std::max(orbit.radius, 0.5f));
+        orbit.speed = 0.04f / sqrtf(std::max(orbit.radius, 0.5f)); // Slower, more majestic
         orbit.planetSize = std::max(0.15f, 0.1f + sqrtf((float)orbit.numTracks) * 0.06f);
 
         float trackOrbitR = orbit.planetSize * 3.0f;
@@ -562,6 +562,12 @@ bool initSDL(App& app) {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    // Bigger, bolder default font
+    io.Fonts->AddFontDefault();
+    ImFontConfig fontCfg;
+    fontCfg.SizePixels = 18.0f;
+    fontCfg.OversampleH = 2;
+    io.Fonts->AddFontDefault(&fontCfg);
     ImGui::StyleColorsDark();
 
     // Style - dark space theme
@@ -824,25 +830,39 @@ void renderScene(App& app) {
             float starSize = n.radius * 0.35f;
 
             // Star sphere with starCore texture - the MAIN bright element
-            // Star = glowing blob -- blue-white like the original
+            // Star = glowing blob with animated flame edge
             glDepthMask(GL_FALSE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);
             app.billboardShader.use();
             app.billboardShader.setMat4("uView", glm::value_ptr(view));
             app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
 
-            // Blue-white color shift like the original Planetary
             glm::vec3 starColor = glm::mix(n.color, glm::vec3(0.8f, 0.9f, 1.0f), 0.5f);
 
             // Bright hot core
             glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-            app.billboard.draw(n.pos, glm::vec4(1.0f, 1.0f, 1.0f, 0.8f), starSize * 1.2f);
+            app.billboard.draw(n.pos, glm::vec4(1.0f, 1.0f, 1.0f, 0.85f), starSize * 1.2f);
+
+            // Flame edge: multiple slightly offset glow sprites that animate
+            // Creates a flickering, irregular edge like solar prominences
+            glBindTexture(GL_TEXTURE_2D, app.texParticle);
+            for (int fi = 0; fi < 12; fi++) {
+                float a = (float)fi / 12.0f * 2.0f * (float)M_PI;
+                float pulse = sinf(app.elapsedTime * (1.5f + fi * 0.3f) + a * 2.0f);
+                float dist = starSize * (0.6f + pulse * 0.15f);
+                glm::vec3 fpos = n.pos + glm::vec3(cosf(a) * dist, sinf(a * 0.7f) * dist * 0.3f, sinf(a) * dist);
+                float fsize = starSize * (0.4f + pulse * 0.1f);
+                float falpha = 0.06f + pulse * 0.02f;
+                glm::vec3 fcol = glm::mix(glm::vec3(1.0f, 0.95f, 0.8f), starColor, 0.3f + fi * 0.05f);
+                app.billboard.draw(fpos, glm::vec4(fcol, falpha), fsize);
+            }
 
             // Blue-white mid glow
-            app.billboard.draw(n.pos, glm::vec4(starColor, 0.2f), starSize * 2.5f);
+            glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
+            app.billboard.draw(n.pos, glm::vec4(starColor, 0.15f), starSize * 2.5f);
 
-            // Very faint colored halo
-            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.2f, 0.02f), starSize * 5.0f);
+            // Very faint halo
+            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.15f, 0.015f), starSize * 5.0f);
 
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -869,15 +889,17 @@ void renderScene(App& app) {
     if (app.selectedArtist >= 0 && app.selectedArtist < (int)app.artistNodes.size()) {
         auto& star = app.artistNodes[app.selectedArtist];
 
-        // Orbit rings
-        app.ringShader.use();
-        app.ringShader.setMat4("uView", glm::value_ptr(view));
-        app.ringShader.setMat4("uProjection", glm::value_ptr(proj));
-        for (auto& o : star.albumOrbits) {
+        // Orbit rings -- only show for selected album (cleaner look)
+        if (app.selectedAlbum >= 0) {
+            app.ringShader.use();
+            app.ringShader.setMat4("uView", glm::value_ptr(view));
+            app.ringShader.setMat4("uProjection", glm::value_ptr(proj));
+            // Show the selected album's orbit ring
+            auto& selO = star.albumOrbits[app.selectedAlbum];
             glm::mat4 rm = glm::translate(glm::mat4(1.0f), star.pos);
-            rm = glm::scale(rm, glm::vec3(o.radius));
+            rm = glm::scale(rm, glm::vec3(selO.radius));
             app.ringShader.setMat4("uModel", glm::value_ptr(rm));
-            app.ringShader.setVec4("uColor", BRIGHT_BLUE.r, BRIGHT_BLUE.g, BRIGHT_BLUE.b, 0.12f);
+            app.ringShader.setVec4("uColor", BRIGHT_BLUE.r, BRIGHT_BLUE.g, BRIGHT_BLUE.b, 0.08f);
             app.unitRing.draw();
         }
 
@@ -1266,6 +1288,9 @@ void renderUI(App& app) {
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
 
+    // Use the larger bold font
+    ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[1]);
+
     // Left sidebar - title, search, artist/album/track browser
     float sidebarW = 320;
     float sidebarH = std::min((float)app.screenH - 80, 700.0f);
@@ -1505,6 +1530,7 @@ void renderUI(App& app) {
     // Render 3D text labels via ImGui draw lists
     renderLabels(app);
 
+    ImGui::PopFont();
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 }
@@ -1750,6 +1776,20 @@ int main(int argc, char* argv[]) {
         // Rebuild bloom FBOs on resize
         if (app.screenW / 2 != app.bloomW || app.screenH / 2 != app.bloomH) {
             setupBloom(app);
+        }
+
+        // Auto-play next track when current one ends
+        if (app.audio.soundInit && app.audio.isAtEnd() && app.playingArtist >= 0) {
+            auto& star = app.artistNodes[app.playingArtist];
+            if (app.playingAlbum >= 0 && app.playingAlbum < (int)star.albumOrbits.size()) {
+                auto& album = star.albumOrbits[app.playingAlbum];
+                int nextTrack = app.playingTrack + 1;
+                if (nextTrack < (int)album.tracks.size()) {
+                    auto& track = album.tracks[nextTrack];
+                    app.audio.play(track.filePath, track.name, star.name, album.name, track.duration);
+                    app.playingTrack = nextTrack;
+                }
+            }
         }
 
         app.camera.update(dt);
