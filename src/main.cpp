@@ -982,10 +982,67 @@ void renderScene(App& app) {
                 glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
                 for (int w = 0; w < 3; w++) {
                     float waveT = fmodf(app.elapsedTime * 0.5f + (float)w * 1.0f, 3.0f) / 3.0f;
-                    float waveR = coreSize * (2.0f + waveT * 15.0f);
-                    float waveA = (1.0f - waveT) * 0.04f * app.audioWave;
+                    float waveR = coreSize * (2.0f + waveT * 12.0f);
+                    float waveA = (1.0f - waveT) * 0.03f * app.audioWave;
                     app.billboard.draw(n.pos,
                         glm::vec4(starColor * 0.3f, waveA), waveR);
+                }
+
+                // SOLAR FLARES -- particles erupting from star, driven by music
+                glBindTexture(GL_TEXTURE_2D, app.texParticle);
+                int numFlares = 20;
+                for (int fi = 0; fi < numFlares; fi++) {
+                    float seed = (float)fi * 137.508f + n.hue * 50.0f;
+                    float beatPhase = app.elapsedTime * (1.0f + (fi % 5) * 0.4f) + seed;
+
+                    // Eruption lifecycle -- triggered by audio beats
+                    float lifecycle = fmodf(beatPhase * 0.3f, 1.0f);
+                    float eruptForce = sinf(lifecycle * (float)M_PI); // 0->1->0
+                    eruptForce *= (0.3f + app.audioWave * 0.7f); // Stronger with music
+
+                    if (eruptForce < 0.05f) continue; // Skip weak flares
+
+                    // Direction from star surface
+                    float theta = seed * 2.39996f; // golden angle
+                    float phi = sinf(seed * 1.618f) * (float)M_PI;
+                    glm::vec3 dir(
+                        sinf(phi) * cosf(theta),
+                        sinf(phi) * sinf(theta) * 0.6f,
+                        cosf(phi)
+                    );
+
+                    // Distance from star center -- shoots outward
+                    float dist = coreSize * (1.0f + eruptForce * 3.0f);
+                    glm::vec3 flarePos = n.pos + dir * dist;
+
+                    // Size grows as it erupts
+                    float flareSize = coreSize * (0.05f + eruptForce * 0.2f);
+
+                    // Color: hot white -> orange -> red as it flies out
+                    glm::vec3 flareCol = glm::mix(
+                        glm::vec3(1.0f, 0.95f, 0.8f),
+                        glm::mix(starColor, glm::vec3(1.0f, 0.4f, 0.15f), 0.5f),
+                        eruptForce
+                    );
+
+                    float flareAlpha = eruptForce * 0.12f;
+                    app.billboard.draw(flarePos, glm::vec4(flareCol, flareAlpha), flareSize);
+                }
+
+                // Plasma gas clouds -- slower, larger, drifting
+                glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
+                for (int gi = 0; gi < 6; gi++) {
+                    float gasAngle = app.elapsedTime * 0.08f + (float)gi * 1.047f;
+                    float gasR = coreSize * (1.3f + sinf(app.elapsedTime * 0.3f + gi) * 0.3f);
+                    gasR += app.audioWave * coreSize * 0.5f;
+                    glm::vec3 gasPos = n.pos + glm::vec3(
+                        cosf(gasAngle) * gasR,
+                        sinf(gasAngle * 0.7f + gi) * gasR * 0.3f,
+                        sinf(gasAngle) * gasR
+                    );
+                    float gasSize = coreSize * (0.3f + app.audioBass * 0.2f);
+                    glm::vec3 gasCol = glm::mix(starColor, glm::vec3(1.0f, 0.6f, 0.3f), 0.4f);
+                    app.billboard.draw(gasPos, glm::vec4(gasCol, 0.03f + app.audioWave * 0.02f), gasSize);
                 }
             }
             glDepthMask(GL_TRUE);
@@ -1534,6 +1591,16 @@ void renderUI(App& app) {
                         app.playingArtist = app.selectedArtist;
                         app.playingAlbum = i;
                         app.playingTrack = t;
+                        // Select this album and zoom camera to the moon
+                        app.selectedAlbum = i;
+                        app.currentLevel = G_TRACK_LEVEL;
+                        // Compute moon position and fly there
+                        float a = album.angle + app.elapsedTime * album.speed;
+                        glm::vec3 apos = star.pos + glm::vec3(cosf(a)*album.radius, 0, sinf(a)*album.radius);
+                        float ta = track.angle + app.elapsedTime * track.speed;
+                        glm::vec3 mpos = getMoonPos(apos, track.radius, ta, track.tiltX, track.tiltZ);
+                        app.camera.flyTo(mpos, track.radius * 4.0f + 0.5f);
+                        app.camera.autoRotate = false;
                     }
 
                     // Duration on same line, right-aligned
