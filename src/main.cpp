@@ -628,16 +628,24 @@ void render(App& app) {
     app.bgStars.draw();
 
     // --- PASS 2: Star glows (billboards, additive) ---
-    // Original: 15x radius billboard with starGlow texture, additive blend
+    // Scale opacity inversely with star count to prevent whiteout
     app.billboardShader.use();
     app.billboardShader.setMat4("uView", glm::value_ptr(view));
     app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
     glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
+
+    float glowAlphaScale = std::min(1.0f, 30.0f / std::max((float)app.artistNodes.size(), 1.0f));
+
     for (auto& n : app.artistNodes) {
+        // Fade glows by distance from camera to avoid far-away glow buildup
+        float distToCam = glm::length(n.pos - app.camera.position);
+        float distFade = std::clamp(1.0f - (distToCam / 300.0f), 0.0f, 1.0f);
+        if (distFade < 0.01f && !n.isSelected) continue; // skip invisible glows
+
         float pulse = 1.0f + sinf(app.elapsedTime * 1.5f + (float)n.index) * 0.08f;
-        float sz = n.glowRadius * 15.0f * pulse * (n.isSelected ? 1.3f : 1.0f);
-        float alpha = n.isSelected ? 0.6f : 0.35f;
-        app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.7f, alpha), sz);
+        float sz = n.glowRadius * 8.0f * pulse * (n.isSelected ? 1.5f : 1.0f);
+        float alpha = (n.isSelected ? 0.5f : 0.08f * glowAlphaScale) * distFade;
+        app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.5f, alpha), sz);
     }
 
     // Reset blending for solid objects
@@ -754,11 +762,13 @@ void renderUI(App& app) {
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
 
-    // Top bar - title & status
+    // Left sidebar - title, search, artist/album/track browser
+    float sidebarW = 320;
+    float sidebarH = std::min((float)app.screenH - 80, 700.0f);
     ImGui::SetNextWindowPos(ImVec2(10, 10));
-    ImGui::SetNextWindowSize(ImVec2(350, 0));
+    ImGui::SetNextWindowSize(ImVec2(sidebarW, sidebarH));
     ImGui::Begin("##topbar", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_AlwaysAutoResize);
+        ImGuiWindowFlags_NoMove);
 
     ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "PLANETARY");
     ImGui::SameLine();
@@ -801,25 +811,38 @@ void renderUI(App& app) {
 
             // Track list for selected album
             if (i == app.selectedAlbum) {
-                ImGui::Indent(16);
+                ImGui::Indent(12);
                 for (int t = 0; t < (int)album.tracks.size(); t++) {
                     auto& track = album.tracks[t];
                     int mins = (int)track.duration / 60;
                     int secs = (int)track.duration % 60;
-                    char label[256];
-                    snprintf(label, sizeof(label), "%d. %s  (%d:%02d)",
-                        t + 1, track.name.c_str(), mins, secs);
 
                     bool isPlaying = (app.audio.currentTrack == track.filePath && app.audio.playing);
-                    if (isPlaying) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.8f, 1.0f, 1.0f));
 
-                    if (ImGui::Selectable(label, isPlaying)) {
+                    // Highlight playing track, make all tracks clearly clickable
+                    if (isPlaying) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.9f, 1.0f, 1.0f));
+                        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.1f, 0.3f, 0.5f, 0.6f));
+                    } else {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 0.8f, 0.85f, 1.0f));
+                        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.1f, 0.15f, 0.2f, 0.4f));
+                    }
+
+                    char label[512];
+                    snprintf(label, sizeof(label), " %2d  %s", t + 1, track.name.c_str());
+
+                    if (ImGui::Selectable(label, isPlaying, 0, ImVec2(0, 22))) {
                         app.audio.play(track.filePath, track.name, star.name, album.name, track.duration);
                     }
 
-                    if (isPlaying) ImGui::PopStyleColor();
+                    // Duration on same line, right-aligned
+                    ImGui::SameLine(sidebarW - 70);
+                    ImGui::TextColored(ImVec4(0.4f, 0.5f, 0.6f, 0.7f), "%d:%02d", mins, secs);
+
+                    ImGui::PopStyleColor(2);
                 }
-                ImGui::Unindent(16);
+                ImGui::Unindent(12);
+                ImGui::Spacing();
             }
         }
     }
