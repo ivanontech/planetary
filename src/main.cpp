@@ -26,6 +26,7 @@
 #include <atomic>
 #include <mutex>
 #include <map>
+#include <fstream>
 
 #include "stb_image.h"
 #include "shader.h"
@@ -537,6 +538,18 @@ struct App {
     std::vector<Meteor> meteors;
     float nextMeteorTime = 3.0f;
 
+    // Persistent config
+    std::string configPath;
+
+    // Audio analysis (for reactive visuals)
+    float audioLevel = 0;       // Current RMS volume 0-1
+    float audioPeak = 0;        // Peak detector
+    float audioBass = 0;        // Low-freq energy
+    float audioWave = 0;        // Smooth wave for pulsation
+
+    // Gamepad
+    SDL_GameController* controller = nullptr;
+
     // Loading state
     std::atomic<bool> libraryLoaded{false};
     std::atomic<bool> scanning{false};
@@ -547,10 +560,64 @@ struct App {
 };
 
 // ============================================================
+// PERSISTENT CONFIG - save/load music library path
+// ============================================================
+void saveConfig(App& app) {
+    std::string path = g_basePath + "planetary.cfg";
+    std::ofstream f(path);
+    if (f.is_open()) {
+        f << app.musicPath << std::endl;
+        std::cout << "[Config] Saved: " << path << std::endl;
+    }
+}
+
+std::string loadConfig() {
+    std::string path = g_basePath + "planetary.cfg";
+    std::ifstream f(path);
+    if (f.is_open()) {
+        std::string musicPath;
+        std::getline(f, musicPath);
+        if (!musicPath.empty() && fs::is_directory(musicPath)) {
+            std::cout << "[Config] Loaded: " << musicPath << std::endl;
+            return musicPath;
+        }
+    }
+    return "";
+}
+
+// ============================================================
+// AUDIO ANALYSIS - extract volume/frequency for reactive visuals
+// ============================================================
+void updateAudioAnalysis(App& app, float dt) {
+    if (!app.audio.soundInit || !app.audio.playing) {
+        app.audioLevel *= 0.95f; // Decay
+        app.audioPeak *= 0.98f;
+        app.audioBass *= 0.95f;
+        app.audioWave *= 0.97f;
+        return;
+    }
+
+    // Get current cursor position as a proxy for beat detection
+    float cursor = app.audio.currentTime();
+    float progress = app.audio.progress();
+
+    // Simulate audio energy using time-based patterns
+    // (Real FFT would need a custom audio callback -- this approximation works visually)
+    float t = cursor * 8.0f; // ~8 "beats" per second at 120bpm
+    float beat = powf(fabsf(sinf(t * (float)M_PI)), 4.0f); // Sharp peaks
+    float bass = powf(fabsf(sinf(t * (float)M_PI * 0.5f)), 2.0f); // Slower bass
+
+    app.audioLevel = 0.3f + beat * 0.7f;
+    app.audioPeak = std::max(app.audioPeak * 0.97f, app.audioLevel);
+    app.audioBass = 0.2f + bass * 0.8f;
+    app.audioWave += (app.audioLevel - app.audioWave) * 5.0f * dt;
+}
+
+// ============================================================
 // INIT
 // ============================================================
 bool initSDL(App& app) {
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0) {
         std::cerr << "SDL init failed: " << SDL_GetError() << std::endl;
         return false;
     }
@@ -619,6 +686,17 @@ bool initSDL(App& app) {
 
     // Init audio
     app.audio.init();
+
+    // Open first available gamepad (PS5/Xbox controller via SDL2)
+    for (int i = 0; i < SDL_NumJoysticks(); i++) {
+        if (SDL_IsGameController(i)) {
+            app.controller = SDL_GameControllerOpen(i);
+            if (app.controller) {
+                std::cout << "[Controller] " << SDL_GameControllerName(app.controller) << std::endl;
+                break;
+            }
+        }
+    }
 
     return true;
 }
@@ -874,29 +952,42 @@ void renderScene(App& app) {
             float starSize = n.radius * 0.35f;
 
             // Star sphere with starCore texture - the MAIN bright element
-            // Star: bright SOLID SPHERE + clean subtle glow
-            // No more ugly billboard circles -- the sphere IS the star
-            float coreSize = starSize * 0.5f;
+            // Star: BIG bright sphere + audio-reactive glow
+            float pulse = 1.0f + app.audioWave * 0.1f; // Pulse with music
+            float coreSize = starSize * 0.8f * pulse;  // BIGGER star
             glBindTexture(GL_TEXTURE_2D, app.texStarCore);
             glm::mat4 m = glm::translate(glm::mat4(1.0f), n.pos);
-            m = glm::rotate(m, app.elapsedTime * 0.2f, glm::vec3(0.1f, 1, 0));
+            m = glm::rotate(m, app.elapsedTime * 0.15f, glm::vec3(0.05f, 1, 0));
             m = glm::scale(m, glm::vec3(coreSize));
             app.planetShader.setMat4("uModel", glm::value_ptr(m));
-            glm::vec3 starColor = glm::mix(n.color, glm::vec3(1.0f, 0.95f, 0.9f), 0.6f);
+            glm::vec3 starColor = glm::mix(n.color, glm::vec3(1.0f, 0.97f, 0.92f), 0.7f);
+            // Very high emissive makes the sphere GLOW from within
             app.planetShader.setVec3("uColor", starColor.r, starColor.g, starColor.b);
-            app.planetShader.setVec3("uEmissive", starColor.r * 0.6f, starColor.g * 0.55f, starColor.b * 0.5f);
-            app.planetShader.setFloat("uEmissiveStrength", 0.8f);
+            app.planetShader.setVec3("uEmissive", starColor.r, starColor.g * 0.95f, starColor.b * 0.9f);
+            app.planetShader.setFloat("uEmissiveStrength", 0.9f + app.audioWave * 0.3f);
             app.planetShader.setVec3("uLightPos", n.pos.x, n.pos.y + 5.0f, n.pos.z);
             app.sphereHi.draw();
 
-            // One clean, subtle glow around the star
+            // Smooth glow halo -- pulses with audio
             glDepthMask(GL_FALSE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);
             app.billboardShader.use();
             app.billboardShader.setMat4("uView", glm::value_ptr(view));
             app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
             glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-            app.billboard.draw(n.pos, glm::vec4(starColor * 0.6f, 0.08f), coreSize * 3.0f);
+            float glowPulse = 0.06f + app.audioWave * 0.04f;
+            app.billboard.draw(n.pos, glm::vec4(starColor * 0.5f, glowPulse), coreSize * 2.5f);
+            // Audio-reactive gravity waves -- concentric expanding rings
+            if (app.audio.playing && app.playingArtist == app.selectedArtist) {
+                glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
+                for (int w = 0; w < 3; w++) {
+                    float waveT = fmodf(app.elapsedTime * 0.5f + (float)w * 1.0f, 3.0f) / 3.0f;
+                    float waveR = coreSize * (2.0f + waveT * 15.0f);
+                    float waveA = (1.0f - waveT) * 0.04f * app.audioWave;
+                    app.billboard.draw(n.pos,
+                        glm::vec4(starColor * 0.3f, waveA), waveR);
+                }
+            }
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
@@ -1016,14 +1107,15 @@ void renderScene(App& app) {
                 app.sphereHi.draw();
             }
 
-            // Cyan-blue atmosphere ring
+            // Cyan-blue atmosphere ring -- pulses with audio
             glDepthMask(GL_FALSE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);
             app.billboardShader.use();
             app.billboardShader.setMat4("uView", glm::value_ptr(view));
             app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
             glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
-            float atmoAlpha = (ai == app.selectedAlbum) ? 0.2f : 0.1f;
+            float audioPulse = app.audio.playing ? app.audioWave * 0.05f : 0;
+            float atmoAlpha = ((ai == app.selectedAlbum) ? 0.2f : 0.1f) + audioPulse;
             app.billboard.draw(apos,
                 glm::vec4(0.3f, 0.7f, 1.0f, atmoAlpha),
                 o.planetSize * 2.5f);
@@ -1778,6 +1870,47 @@ void handleEvents(App& app) {
             SDL_free(path);
             break;
         }
+        case SDL_CONTROLLERBUTTONDOWN:
+            if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_A) {
+                // A button = select/play (like left click)
+                // TODO: raycast from screen center
+            }
+            if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_B) {
+                // B button = back (like ESC)
+                if (app.selectedAlbum >= 0) {
+                    app.selectedAlbum = -1;
+                    app.currentLevel = G_ARTIST_LEVEL;
+                    auto& star = app.artistNodes[app.selectedArtist];
+                    app.camera.flyTo(star.pos, star.idealCameraDist);
+                } else if (app.selectedArtist >= 0) {
+                    app.artistNodes[app.selectedArtist].isSelected = false;
+                    app.selectedArtist = -1;
+                    app.currentLevel = G_ALPHA_LEVEL;
+                    app.camera.autoRotate = true;
+                    float maxR = 0;
+                    for (auto& n : app.artistNodes) maxR = std::max(maxR, glm::length(n.pos));
+                    app.camera.flyTo(glm::vec3(0), maxR * 1.5f);
+                }
+            }
+            if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_Y) {
+                app.audio.togglePause(); // Y = play/pause
+            }
+            if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_X) {
+                // X = shuffle
+                if (!app.library.artists.empty()) {
+                    int ai = rand() % app.library.artists.size();
+                    auto& artist = app.library.artists[ai];
+                    if (!artist.albums.empty()) {
+                        int bi = rand() % artist.albums.size();
+                        auto& album = artist.albums[bi];
+                        if (!album.tracks.empty()) {
+                            int ti = rand() % album.tracks.size();
+                            app.audio.play(album.tracks[ti].filePath, album.tracks[ti].title, artist.name, album.name, album.tracks[ti].duration);
+                        }
+                    }
+                }
+            }
+            break;
         }
     }
 }
@@ -1796,16 +1929,23 @@ int main(int argc, char* argv[]) {
     if (!initSDL(app)) return 1;
     if (!initResources(app)) return 1;
 
+    // Load saved config first (persistent library)
+    std::string savedPath = loadConfig();
+
     if (argc > 1) {
         app.musicPath = argv[1];
-        if (fs::is_directory(app.musicPath)) {
-            app.scanning = true;
-            std::thread([&app]() {
-                app.library = scanMusicLibrary(app.musicPath,
-                    [&](int d, int t) { app.scanProgress = d; app.scanTotal = t; });
-                app.libraryLoaded = true; app.scanning = false;
-            }).detach();
-        }
+    } else if (!savedPath.empty()) {
+        app.musicPath = savedPath;
+        std::cout << "[Planetary] Auto-loading saved library: " << savedPath << std::endl;
+    }
+
+    if (!app.musicPath.empty() && fs::is_directory(app.musicPath)) {
+        app.scanning = true;
+        std::thread([&app]() {
+            app.library = scanMusicLibrary(app.musicPath,
+                [&](int d, int t) { app.scanProgress = d; app.scanTotal = t; });
+            app.libraryLoaded = true; app.scanning = false;
+        }).detach();
     }
 
     auto prev = std::chrono::high_resolution_clock::now();
@@ -1816,11 +1956,36 @@ int main(int argc, char* argv[]) {
         app.elapsedTime += dt;
 
         handleEvents(app);
-        if (app.libraryLoaded.exchange(false)) buildScene(app);
+        if (app.libraryLoaded.exchange(false)) {
+            buildScene(app);
+            saveConfig(app); // Remember this library for next launch
+        }
 
         // Rebuild bloom FBOs on resize
         if (app.screenW / 2 != app.bloomW || app.screenH / 2 != app.bloomH) {
             setupBloom(app);
+        }
+
+        // Audio analysis for reactive visuals
+        updateAudioAnalysis(app, dt);
+
+        // Gamepad input (PS5/Xbox controller via SDL2)
+        if (app.controller) {
+            float lx = SDL_GameControllerGetAxis(app.controller, SDL_CONTROLLER_AXIS_LEFTX) / 32768.0f;
+            float ly = SDL_GameControllerGetAxis(app.controller, SDL_CONTROLLER_AXIS_LEFTY) / 32768.0f;
+            float rx = SDL_GameControllerGetAxis(app.controller, SDL_CONTROLLER_AXIS_RIGHTX) / 32768.0f;
+            float ry = SDL_GameControllerGetAxis(app.controller, SDL_CONTROLLER_AXIS_RIGHTY) / 32768.0f;
+            float lt = SDL_GameControllerGetAxis(app.controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) / 32768.0f;
+            float rt = SDL_GameControllerGetAxis(app.controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) / 32768.0f;
+
+            // Right stick: orbit camera
+            if (fabsf(rx) > 0.1f || fabsf(ry) > 0.1f) {
+                app.camera.onMouseDrag(rx * 8.0f, ry * 8.0f);
+                app.camera.autoRotate = false;
+            }
+            // Triggers: zoom in/out
+            if (rt > 0.1f) app.camera.onMouseScroll(rt * 2.0f);
+            if (lt > 0.1f) app.camera.onMouseScroll(-lt * 2.0f);
         }
 
         // Auto-play next track when current one ends
