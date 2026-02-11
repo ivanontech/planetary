@@ -161,11 +161,14 @@ void computeArtistPosition(ArtistNode& node, int total) {
     std::hash<std::string> hasher;
     size_t h = hasher(node.name);
     float hashPer = (float)(h % 9000L) / 90.0f + 10.0f;
-    // Spread stars much further apart -- more empty space between them
-    float spreadFactor = 3.5f;
+    // Spread stars apart with 3D depth -- NOT flat on one plane
+    float spreadFactor = 3.0f;
     hashPer *= spreadFactor;
     float angle = (float)node.index * 0.618f;
-    float height = (hashPer * 0.15f - 10.0f * spreadFactor) * 0.6f; // Flatter disc
+    // Use a second hash for vertical position -- real 3D distribution
+    size_t h2 = hasher(node.name + "_y");
+    float yHash = ((float)(h2 % 10000) / 10000.0f - 0.5f) * 2.0f;
+    float height = yHash * hashPer * 0.4f; // Spread vertically too
     node.pos = glm::vec3(cosf(angle) * hashPer, height, sinf(angle) * hashPer);
 }
 
@@ -497,6 +500,18 @@ struct App {
     // Currently playing track location (for trail rendering)
     int playingArtist = -1, playingAlbum = -1, playingTrack = -1;
 
+    // Shooting star meteors (random tracks)
+    struct Meteor {
+        glm::vec3 pos, vel;
+        glm::vec3 color;
+        float life, maxLife;
+        float size;
+        std::string trackName;
+        std::vector<glm::vec3> trail;
+    };
+    std::vector<Meteor> meteors;
+    float nextMeteorTime = 3.0f;
+
     // Loading state
     std::atomic<bool> libraryLoaded{false};
     std::atomic<bool> scanning{false};
@@ -747,9 +762,9 @@ void renderScene(App& app) {
         glm::mat4 skyM = glm::translate(glm::mat4(1.0f), app.camera.position);
         skyM = glm::scale(skyM, glm::vec3(900.0f));
         app.planetShader.setMat4("uModel", glm::value_ptr(skyM));
-        // Teal-blue nebula like the original Planetary
-        app.planetShader.setVec3("uColor", 0.12f, 0.18f, 0.28f);
-        app.planetShader.setVec3("uEmissive", 0.035f, 0.055f, 0.1f);
+        // Dark teal nebula -- space should feel vast and dark
+        app.planetShader.setVec3("uColor", 0.08f, 0.12f, 0.2f);
+        app.planetShader.setVec3("uEmissive", 0.02f, 0.035f, 0.07f);
         app.planetShader.setFloat("uEmissiveStrength", 1.0f);
         app.planetShader.setVec3("uLightPos", 0, 0, 0);
         glCullFace(GL_FRONT); glEnable(GL_CULL_FACE);
@@ -830,17 +845,17 @@ void renderScene(App& app) {
             app.billboardShader.setMat4("uView", glm::value_ptr(view));
             app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
 
-            // Tight inner glow (just slightly bigger than the sphere)
+            // Very tight glow -- just a halo around the sphere
             glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-            app.billboard.draw(n.pos, glm::vec4(1.0f, 0.98f, 0.9f, 0.35f), starSize * 4.0f);
+            app.billboard.draw(n.pos, glm::vec4(1.0f, 0.98f, 0.9f, 0.25f), starSize * 2.5f);
 
-            // Colored halo -- NOT huge, just 2-3x the star size
-            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.6f, 0.1f), starSize * 7.0f);
+            // Subtle colored corona
+            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.4f, 0.05f), starSize * 4.5f);
 
-            // Lens flare -- subtle
+            // Lens flare -- very subtle rays
             glBindTexture(GL_TEXTURE_2D, app.texLensFlare);
             float flarePulse = 1.0f + sinf(app.elapsedTime * 0.8f) * 0.03f;
-            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.4f + glm::vec3(0.2f), 0.06f), starSize * 10.0f * flarePulse);
+            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.3f + glm::vec3(0.15f), 0.04f), starSize * 6.0f * flarePulse);
 
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -1000,6 +1015,119 @@ void renderScene(App& app) {
             app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
             glBindTexture(GL_TEXTURE_2D, app.texSurface);
         }
+    }
+}
+
+// ============================================================
+// METEORS - random track shooting stars
+// ============================================================
+void updateMeteors(App& app, float dt) {
+    if (app.artistNodes.empty()) return;
+
+    // Spawn new meteors
+    app.nextMeteorTime -= dt;
+    if (app.nextMeteorTime <= 0) {
+        app.nextMeteorTime = 2.0f + (float)(rand() % 60) / 10.0f; // 2-8 seconds
+
+        // Pick a random track from the library
+        if (!app.library.artists.empty()) {
+            int ai = rand() % app.library.artists.size();
+            auto& artist = app.library.artists[ai];
+            if (!artist.albums.empty()) {
+                int bi = rand() % artist.albums.size();
+                auto& album = artist.albums[bi];
+                if (!album.tracks.empty()) {
+                    int ti = rand() % album.tracks.size();
+
+                    App::Meteor m;
+                    // Start from random edge of the galaxy
+                    float angle = (float)(rand() % 1000) / 1000.0f * 2.0f * (float)M_PI;
+                    float dist = 100.0f + (float)(rand() % 200);
+                    float y = ((float)(rand() % 100) / 100.0f - 0.5f) * 80.0f;
+                    m.pos = glm::vec3(cosf(angle) * dist, y, sinf(angle) * dist);
+
+                    // Fly toward center-ish with some randomness
+                    glm::vec3 target = glm::vec3(
+                        ((float)(rand() % 100) / 100.0f - 0.5f) * 40.0f,
+                        ((float)(rand() % 100) / 100.0f - 0.5f) * 20.0f,
+                        ((float)(rand() % 100) / 100.0f - 0.5f) * 40.0f
+                    );
+                    m.vel = glm::normalize(target - m.pos) * (15.0f + (float)(rand() % 20));
+
+                    // Color based on artist
+                    if (ai < (int)app.artistNodes.size()) {
+                        m.color = app.artistNodes[ai].glowColor;
+                    } else {
+                        m.color = BRIGHT_BLUE;
+                    }
+                    m.size = 0.15f + (float)(rand() % 100) / 500.0f;
+                    m.maxLife = 3.0f + (float)(rand() % 30) / 10.0f;
+                    m.life = m.maxLife;
+                    m.trackName = album.tracks[ti].title;
+                    app.meteors.push_back(m);
+                }
+            }
+        }
+    }
+
+    // Update existing meteors
+    for (auto& m : app.meteors) {
+        m.trail.push_back(m.pos);
+        if (m.trail.size() > 20) m.trail.erase(m.trail.begin());
+        m.pos += m.vel * dt;
+        m.life -= dt;
+    }
+
+    // Remove dead meteors
+    app.meteors.erase(
+        std::remove_if(app.meteors.begin(), app.meteors.end(),
+            [](const App::Meteor& m) { return m.life <= 0; }),
+        app.meteors.end()
+    );
+}
+
+void renderMeteors(App& app) {
+    if (app.meteors.empty()) return;
+    glm::mat4 view = app.camera.viewMatrix();
+    glm::mat4 proj = app.camera.projMatrix();
+
+    for (auto& m : app.meteors) {
+        float alpha = std::min(m.life / m.maxLife, 1.0f) * std::min((m.maxLife - m.life) / 0.5f, 1.0f);
+
+        // Meteor head (additive glow)
+        glDepthMask(GL_FALSE);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+        app.billboardShader.use();
+        app.billboardShader.setMat4("uView", glm::value_ptr(view));
+        app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
+        glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
+        app.billboard.draw(m.pos, glm::vec4(m.color, alpha * 0.4f), m.size * 3.0f);
+        app.billboard.draw(m.pos, glm::vec4(1.0f, 1.0f, 1.0f, alpha * 0.6f), m.size * 1.0f);
+
+        // Trail
+        if (m.trail.size() >= 2) {
+            std::vector<float> tv;
+            for (auto& p : m.trail) { tv.push_back(p.x); tv.push_back(p.y); tv.push_back(p.z); }
+            GLuint tvao, tvbo;
+            glGenVertexArrays(1, &tvao); glGenBuffers(1, &tvbo);
+            glBindVertexArray(tvao); glBindBuffer(GL_ARRAY_BUFFER, tvbo);
+            glBufferData(GL_ARRAY_BUFFER, tv.size()*sizeof(float), tv.data(), GL_STREAM_DRAW);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3*sizeof(float), 0);
+            glEnableVertexAttribArray(0);
+
+            app.ringShader.use();
+            app.ringShader.setMat4("uView", glm::value_ptr(view));
+            app.ringShader.setMat4("uProjection", glm::value_ptr(proj));
+            glm::mat4 id(1.0f);
+            app.ringShader.setMat4("uModel", glm::value_ptr(id));
+            app.ringShader.setVec4("uColor", m.color.r, m.color.g, m.color.b, alpha * 0.3f);
+            glDrawArrays(GL_LINE_STRIP, 0, (int)m.trail.size());
+
+            glDeleteBuffers(1, &tvbo); glDeleteVertexArrays(1, &tvao);
+        }
+
+        glDepthMask(GL_TRUE);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     }
 }
 
@@ -1206,6 +1334,28 @@ void renderUI(App& app) {
         if (ImGui::Button(app.audio.playing ? "||" : ">", ImVec2(30, 30))) {
             app.audio.togglePause();
         }
+        ImGui::SameLine();
+
+        // Shuffle button -- plays a random track and spawns a meteor
+        if (ImGui::Button("~", ImVec2(30, 30))) {
+            if (!app.library.artists.empty()) {
+                int ai = rand() % app.library.artists.size();
+                auto& artist = app.library.artists[ai];
+                if (!artist.albums.empty()) {
+                    int bi = rand() % artist.albums.size();
+                    auto& album = artist.albums[bi];
+                    if (!album.tracks.empty()) {
+                        int ti = rand() % album.tracks.size();
+                        auto& track = album.tracks[ti];
+                        app.audio.play(track.filePath, track.title, artist.name, album.name, track.duration);
+                        app.playingArtist = ai;
+                        app.playingAlbum = bi;
+                        app.playingTrack = ti;
+                    }
+                }
+            }
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shuffle");
         ImGui::SameLine();
 
         // Track info
@@ -1513,7 +1663,9 @@ int main(int argc, char* argv[]) {
         }
 
         app.camera.update(dt);
+        updateMeteors(app, dt);
         render(app);
+        renderMeteors(app);
         renderUI(app);   // also calls renderLabels inside ImGui frame
         SDL_GL_SwapWindow(app.window);
     }
