@@ -223,7 +223,9 @@ void computeAlbumOrbits(ArtistNode& node, const ArtistData& artistData, int arti
             trackOrbitR += moonSize * 2.0f;
             to.radius = trackOrbitR;
             to.angle = (float)ti * 2.396f;
-            to.speed = (2.0f * (float)M_PI) / std::max(to.duration, 30.0f);
+            // Orbit speed: shorter tracks orbit FASTER (but all visibly move)
+            // Scale so even a 5-min track completes an orbit in ~20 seconds
+            to.speed = (2.0f * (float)M_PI) / (std::max(to.duration, 30.0f) * 0.08f);
             to.size = moonSize;
             // Unique orbital tilt per moon -- 3D orbits not flat
             std::hash<std::string> th;
@@ -904,7 +906,7 @@ void renderScene(App& app) {
         glDisable(GL_CULL_FACE);
     }
 
-    // Background point stars (always)
+    // Background point stars
     glBlendFunc(GL_SRC_ALPHA, GL_ONE);
     app.starPointShader.use();
     app.starPointShader.setMat4("uView", glm::value_ptr(view));
@@ -913,6 +915,45 @@ void renderScene(App& app) {
     glBindTexture(GL_TEXTURE_2D, app.texStar);
     app.starPointShader.setInt("uTexture", 0);
     app.bgStars.draw();
+
+    // --- NEBULA CLOUDS --- colorful gas clouds scattered in deep space
+    // Creates the Hubble-like nebula atmosphere
+    app.billboardShader.use();
+    app.billboardShader.setMat4("uView", glm::value_ptr(view));
+    app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
+    glBindTexture(GL_TEXTURE_2D, app.texParticle);
+    {
+        // Seed-based nebula clouds at fixed positions
+        std::mt19937 nebRng(12345); // deterministic
+        std::uniform_real_distribution<float> nebDist(-400.0f, 400.0f);
+        std::uniform_real_distribution<float> nebSize(30.0f, 120.0f);
+        std::uniform_real_distribution<float> nebHue(0.0f, 1.0f);
+
+        int numClouds = 40;
+        for (int ci = 0; ci < numClouds; ci++) {
+            glm::vec3 cpos(nebDist(nebRng), nebDist(nebRng) * 0.4f, nebDist(nebRng));
+            float csize = nebSize(nebRng);
+            float ch = nebHue(nebRng);
+
+            // Nebula colors: blues, purples, reds, oranges
+            glm::vec3 nebColor;
+            if (ch < 0.3f) nebColor = glm::vec3(0.2f, 0.3f, 0.8f);       // Blue
+            else if (ch < 0.5f) nebColor = glm::vec3(0.5f, 0.2f, 0.7f);   // Purple
+            else if (ch < 0.7f) nebColor = glm::vec3(0.8f, 0.2f, 0.15f);  // Red
+            else if (ch < 0.85f) nebColor = glm::vec3(0.7f, 0.4f, 0.15f); // Orange
+            else nebColor = glm::vec3(0.15f, 0.6f, 0.5f);                  // Teal
+
+            // Very subtle -- just enough to tint the darkness
+            float nebAlpha = 0.008f + sinf(app.elapsedTime * 0.1f + ci * 0.5f) * 0.002f;
+
+            // Audio reactivity -- nebulae glow slightly with music
+            if (app.audio.playing) {
+                nebAlpha += app.audioWave * 0.003f;
+            }
+
+            app.billboard.draw(cpos, glm::vec4(nebColor, nebAlpha), csize);
+        }
+    }
 
     // --- Star rendering ---
     app.billboardShader.use();
@@ -1506,22 +1547,24 @@ void renderUI(App& app) {
             app.scanProgress.load(), app.scanTotal.load());
     }
 
-    // Search
+    // Search with clickable results list
     if (app.artistNodes.size() > 0) {
         static char searchBuf[256] = "";
         ImGui::SetNextItemWidth(290);
-        if (ImGui::InputTextWithHint("##search", "Search artists...", searchBuf, sizeof(searchBuf),
-                ImGuiInputTextFlags_AutoSelectAll)) {
-            // Search changed -- fly to first matching artist
-            app.searchQuery = searchBuf;
-            if (strlen(searchBuf) > 0) {
-                std::string q = searchBuf;
-                std::transform(q.begin(), q.end(), q.begin(), ::tolower);
-                for (int i = 0; i < (int)app.artistNodes.size(); i++) {
-                    std::string lower = app.artistNodes[i].name;
-                    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-                    if (lower.find(q) != std::string::npos) {
-                        // Select and fly to this artist
+        ImGui::InputTextWithHint("##search", "Search artists...", searchBuf, sizeof(searchBuf));
+        app.searchQuery = searchBuf;
+
+        // Show clickable search results when searching
+        if (strlen(searchBuf) > 1 && app.selectedArtist < 0) {
+            std::string q = searchBuf;
+            std::transform(q.begin(), q.end(), q.begin(), ::tolower);
+            int shown = 0;
+            for (int i = 0; i < (int)app.artistNodes.size() && shown < 15; i++) {
+                std::string lower = app.artistNodes[i].name;
+                std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                if (lower.find(q) != std::string::npos) {
+                    if (ImGui::Selectable(app.artistNodes[i].name.c_str(), false, 0, ImVec2(0, 20))) {
+                        // Click to navigate to this artist
                         if (app.selectedArtist >= 0) app.artistNodes[app.selectedArtist].isSelected = false;
                         app.selectedArtist = i;
                         app.selectedAlbum = -1;
@@ -1529,12 +1572,13 @@ void renderUI(App& app) {
                         app.currentLevel = G_ARTIST_LEVEL;
                         app.camera.autoRotate = false;
                         app.camera.flyTo(app.artistNodes[i].pos, app.artistNodes[i].idealCameraDist);
-                        break;
+                        searchBuf[0] = '\0'; // Clear search after selection
+                        app.searchQuery = "";
                     }
+                    shown++;
                 }
             }
         }
-        app.searchQuery = searchBuf;
     }
 
     // Selected artist info
