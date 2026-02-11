@@ -468,6 +468,7 @@ struct App {
     Shader starPointShader, billboardShader, planetShader, ringShader;
     Shader bloomBrightShader, bloomBlurShader, bloomCompositeShader;
     GLuint texStarGlow=0, texAtmosphere=0, texStar=0, texSurface=0, texSkydome=0;
+    GLuint texLensFlare=0, texStarCore=0, texEclipseGlow=0;
     BackgroundStars bgStars;
     BillboardQuad billboard;
     SphereMesh sphereHi, sphereMd, sphereLo;
@@ -633,6 +634,9 @@ bool initResources(App& app) {
     app.texStar = loadTexture("resources/star.png");
     app.texSurface = loadTexture("resources/surfacesHighRes.png");
     app.texSkydome = loadTexture("resources/skydomeFull.png");
+    app.texLensFlare = loadTexture("resources/lensFlare.png");
+    app.texStarCore = loadTexture("resources/starCore.png");
+    app.texEclipseGlow = loadTexture("resources/eclipseGlow.png");
 
     app.bgStars.create(8000);
     app.billboard.create();
@@ -705,8 +709,8 @@ void renderScene(App& app) {
         glm::mat4 skyM = glm::translate(glm::mat4(1.0f), app.camera.position);
         skyM = glm::scale(skyM, glm::vec3(900.0f));
         app.planetShader.setMat4("uModel", glm::value_ptr(skyM));
-        app.planetShader.setVec3("uColor", 0.3f, 0.35f, 0.5f);
-        app.planetShader.setVec3("uEmissive", 0.08f, 0.1f, 0.18f);
+        app.planetShader.setVec3("uColor", 0.15f, 0.2f, 0.3f);
+        app.planetShader.setVec3("uEmissive", 0.04f, 0.06f, 0.12f);
         app.planetShader.setFloat("uEmissiveStrength", 1.0f);
         app.planetShader.setVec3("uLightPos", 0, 0, 0);
         glCullFace(GL_FRONT); glEnable(GL_CULL_FACE);
@@ -757,24 +761,72 @@ void renderScene(App& app) {
     glEnable(GL_DEPTH_TEST);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    // --- Star cores (emissive spheres) ---
+    // --- Star cores ---
     app.planetShader.use();
     app.planetShader.setMat4("uView", glm::value_ptr(view));
     app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
     app.planetShader.setVec3("uLightPos", 0, 50, 0);
-    glBindTexture(GL_TEXTURE_2D, app.texSurface);
+
     for (auto& n : app.artistNodes) {
-        float cs = n.radius * 0.16f;
-        glm::mat4 m = glm::translate(glm::mat4(1.0f), n.pos);
-        m = glm::rotate(m, app.elapsedTime * 0.5f, glm::vec3(0,1,0));
-        m = glm::scale(m, glm::vec3(cs));
-        app.planetShader.setMat4("uModel", glm::value_ptr(m));
-        // Bright white-hot core with colored outer
-        glm::vec3 coreColor = glm::mix(n.color, glm::vec3(1.0f), 0.5f);
-        app.planetShader.setVec3("uColor", coreColor.r, coreColor.g, coreColor.b);
-        app.planetShader.setVec3("uEmissive", n.color.r, n.color.g, n.color.b);
-        app.planetShader.setFloat("uEmissiveStrength", 0.6f);
-        app.sphereLo.draw();
+        if (n.isSelected) {
+            // SELECTED STAR: massive bright sphere like the original
+            // The original Planetary has the star fill ~1/4 of the screen
+            float starSize = n.radius * 0.5f;  // Much bigger core
+
+            // Star sphere with starCore texture
+            glBindTexture(GL_TEXTURE_2D, app.texStarCore);
+            glm::mat4 m = glm::translate(glm::mat4(1.0f), n.pos);
+            m = glm::rotate(m, app.elapsedTime * 0.3f, glm::vec3(0,1,0));
+            m = glm::scale(m, glm::vec3(starSize));
+            app.planetShader.setMat4("uModel", glm::value_ptr(m));
+            glm::vec3 hotColor = glm::mix(n.color, glm::vec3(1.0f), 0.7f);
+            app.planetShader.setVec3("uColor", hotColor.r, hotColor.g, hotColor.b);
+            app.planetShader.setVec3("uEmissive", 1.0f, 0.95f, 0.85f);
+            app.planetShader.setFloat("uEmissiveStrength", 1.5f);
+            app.sphereHi.draw();
+
+            // Massive glow layers around the star (additive)
+            glDepthMask(GL_FALSE);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+            app.billboardShader.use();
+            app.billboardShader.setMat4("uView", glm::value_ptr(view));
+            app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
+
+            // Inner hot white glow
+            glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
+            app.billboard.draw(n.pos, glm::vec4(1.0f, 0.98f, 0.9f, 0.6f), starSize * 12.0f);
+
+            // Mid colored glow
+            app.billboard.draw(n.pos, glm::vec4(n.glowColor, 0.3f), starSize * 30.0f);
+
+            // Outer soft glow
+            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.5f, 0.12f), starSize * 50.0f);
+
+            // Lens flare
+            glBindTexture(GL_TEXTURE_2D, app.texLensFlare);
+            float flareSize = starSize * 40.0f;
+            float flarePulse = 1.0f + sinf(app.elapsedTime * 0.8f) * 0.05f;
+            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.8f + glm::vec3(0.2f), 0.15f), flareSize * flarePulse);
+
+            glDepthMask(GL_TRUE);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            app.planetShader.use();
+            app.planetShader.setMat4("uView", glm::value_ptr(view));
+            app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
+        } else {
+            // Non-selected: small colored sphere
+            float cs = n.radius * 0.16f;
+            glBindTexture(GL_TEXTURE_2D, app.texStarCore);
+            glm::mat4 m = glm::translate(glm::mat4(1.0f), n.pos);
+            m = glm::rotate(m, app.elapsedTime * 0.5f, glm::vec3(0,1,0));
+            m = glm::scale(m, glm::vec3(cs));
+            app.planetShader.setMat4("uModel", glm::value_ptr(m));
+            glm::vec3 coreColor = glm::mix(n.color, glm::vec3(1.0f), 0.4f);
+            app.planetShader.setVec3("uColor", coreColor.r, coreColor.g, coreColor.b);
+            app.planetShader.setVec3("uEmissive", n.color.r, n.color.g, n.color.b);
+            app.planetShader.setFloat("uEmissiveStrength", 0.5f);
+            app.sphereLo.draw();
+        }
     }
 
     // --- Selected artist: orbit rings + album planets ---
@@ -805,13 +857,14 @@ void renderScene(App& app) {
             glm::vec3 apos = star.pos + glm::vec3(cosf(angle)*o.radius, 0, sinf(angle)*o.radius);
 
             glm::mat4 pm = glm::translate(glm::mat4(1.0f), apos);
-            pm = glm::rotate(pm, app.elapsedTime * 0.3f, glm::vec3(0,1,0));
+            pm = glm::rotate(pm, app.elapsedTime * 0.15f + (float)ai * 1.5f, glm::vec3(0.1f,1,0.05f));
             pm = glm::scale(pm, glm::vec3(o.planetSize));
             app.planetShader.setMat4("uModel", glm::value_ptr(pm));
-            app.planetShader.setVec3("uColor", star.color.r*0.9f, star.color.g*0.9f, star.color.b*0.9f);
-            app.planetShader.setVec3("uLightPos", star.pos.x, star.pos.y+2, star.pos.z);
-            app.planetShader.setVec3("uEmissive", star.color.r, star.color.g, star.color.b);
-            app.planetShader.setFloat("uEmissiveStrength", ai == app.selectedAlbum ? 0.5f : 0.15f);
+            // Planets are darker, lit by the star -- like the original
+            app.planetShader.setVec3("uColor", 0.7f, 0.7f, 0.7f);
+            app.planetShader.setVec3("uLightPos", star.pos.x, star.pos.y, star.pos.z);
+            app.planetShader.setVec3("uEmissive", star.color.r * 0.15f, star.color.g * 0.15f, star.color.b * 0.15f);
+            app.planetShader.setFloat("uEmissiveStrength", ai == app.selectedAlbum ? 0.3f : 0.05f);
             app.sphereHi.draw();
 
             // Atmosphere glow
@@ -848,9 +901,10 @@ void renderScene(App& app) {
                     glm::mat4 mm = glm::translate(glm::mat4(1.0f), mp);
                     mm = glm::scale(mm, glm::vec3(t.size));
                     app.planetShader.setMat4("uModel", glm::value_ptr(mm));
-                    app.planetShader.setVec3("uColor", star.color.r, star.color.g, star.color.b);
-                    app.planetShader.setVec3("uEmissive", star.color.r, star.color.g, star.color.b);
-                    app.planetShader.setFloat("uEmissiveStrength", 0.2f);
+                    app.planetShader.setVec3("uLightPos", star.pos.x, star.pos.y, star.pos.z);
+                    app.planetShader.setVec3("uColor", 0.6f, 0.6f, 0.65f);
+                    app.planetShader.setVec3("uEmissive", star.color.r * 0.1f, star.color.g * 0.1f, star.color.b * 0.1f);
+                    app.planetShader.setFloat("uEmissiveStrength", 0.1f);
                     app.sphereMd.draw();
                 }
             }
