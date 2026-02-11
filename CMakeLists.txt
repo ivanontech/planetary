@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Sources
 file(GLOB SOURCES src/*.cpp)
+file(GLOB IMGUI_SOURCES src/imgui/*.cpp)
+list(APPEND SOURCES ${IMGUI_SOURCES})
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     # ===============================================

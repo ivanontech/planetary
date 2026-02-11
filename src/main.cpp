@@ -10,6 +10,11 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+// Dear ImGui
+#include "imgui/imgui.h"
+#include "imgui/imgui_impl_sdl2.h"
+#include "imgui/imgui_impl_opengl3.h"
+
 #include <iostream>
 #include <vector>
 #include <string>
@@ -19,11 +24,23 @@
 #include <chrono>
 #include <thread>
 #include <atomic>
+#include <mutex>
 
 #include "stb_image.h"
 #include "shader.h"
 #include "camera.h"
 #include "music_data.h"
+
+// ============================================================
+// FORCE DISCRETE GPU (NVIDIA / AMD)
+// This tells the driver to use the RTX 5090 instead of integrated
+// ============================================================
+#ifdef _WIN32
+extern "C" {
+    __declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
+    __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+#endif
 
 // ============================================================
 // GLOBALS - from original Globals.h
@@ -36,6 +53,28 @@ static const int G_TRACK_LEVEL  = 4;
 static const glm::vec3 BRIGHT_BLUE{0.4f, 0.8f, 1.0f};
 static const glm::vec3 BLUE{0.1f, 0.2f, 0.5f};
 static const glm::vec3 GREY{0.1f, 0.1f, 0.15f};
+
+// ============================================================
+// RESOURCE PATH RESOLUTION
+// On Windows, double-clicking the exe sets CWD to something random.
+// We resolve all paths relative to the exe's actual directory.
+// ============================================================
+static std::string g_basePath;
+
+std::string resolvePath(const std::string& relative) {
+    return g_basePath + relative;
+}
+
+void initBasePath() {
+    char* sdlBase = SDL_GetBasePath();
+    if (sdlBase) {
+        g_basePath = sdlBase;
+        SDL_free(sdlBase);
+    } else {
+        g_basePath = "./";
+    }
+    std::cout << "[Planetary] Base path: " << g_basePath << std::endl;
+}
 
 // ============================================================
 // NODE STRUCTURES - from original Node.h, NodeArtist, etc.
@@ -55,7 +94,6 @@ struct ArtistNode {
     int totalTracks;
     bool isSelected = false;
 
-    // Album orbit data
     struct AlbumOrbit {
         float radius;
         float angle;
@@ -63,13 +101,15 @@ struct ArtistNode {
         float planetSize;
         int numTracks;
         std::string name;
-        // Track orbits
+        int artistIndex; // back-reference
+        int albumIndex;
         struct TrackOrbit {
             float radius;
             float angle;
             float speed;
             float size;
             std::string name;
+            std::string filePath;
             float duration;
         };
         std::vector<TrackOrbit> tracks;
@@ -83,20 +123,15 @@ struct ArtistNode {
 void computeArtistColor(ArtistNode& node) {
     const std::string& name = node.name;
     char c1 = ' ', c2 = ' ';
-    if (name.length() >= 3) {
-        c1 = name[1];
-        c2 = name[2];
-    }
+    if (name.length() >= 3) { c1 = name[1]; c2 = name[2]; }
     int c1Int = std::clamp((int)c1, 32, 127);
     int c2Int = std::clamp((int)c2, 32, 127);
-
     int totalCharAscii = (c1Int - 32) + (c2Int - 32);
     float asciiPer = ((float)totalCharAscii / 190.0f) * 5000.0f;
 
     node.hue = sinf(asciiPer) * 0.35f + 0.35f;
-    node.sat = (1.0f - sinf((node.hue + 0.15f) * M_PI)) * 0.75f;
+    node.sat = (1.0f - sinf((node.hue + 0.15f) * (float)M_PI)) * 0.75f;
 
-    // HSV to RGB
     auto hsvToRgb = [](float h, float s, float v) -> glm::vec3 {
         float c = v * s;
         float x = c * (1.0f - fabsf(fmodf(h * 6.0f, 2.0f) - 1.0f));
@@ -104,12 +139,9 @@ void computeArtistColor(ArtistNode& node) {
         glm::vec3 rgb;
         int hi = (int)(h * 6.0f) % 6;
         switch (hi) {
-            case 0: rgb = {c, x, 0}; break;
-            case 1: rgb = {x, c, 0}; break;
-            case 2: rgb = {0, c, x}; break;
-            case 3: rgb = {0, x, c}; break;
-            case 4: rgb = {x, 0, c}; break;
-            default: rgb = {c, 0, x}; break;
+            case 0: rgb = {c,x,0}; break; case 1: rgb = {x,c,0}; break;
+            case 2: rgb = {0,c,x}; break; case 3: rgb = {0,x,c}; break;
+            case 4: rgb = {x,0,c}; break; default: rgb = {c,0,x}; break;
         }
         return rgb + glm::vec3(m);
     };
@@ -122,69 +154,54 @@ void computeArtistColor(ArtistNode& node) {
 
 // ============================================================
 // STAR POSITIONING - from NodeArtist.cpp setData()
-// Golden angle spiral with hash-based distance
 // ============================================================
 void computeArtistPosition(ArtistNode& node, int total) {
-    // Original uses hash-based distance and index-based angle
     std::hash<std::string> hasher;
     size_t h = hasher(node.name);
     float hashPer = (float)(h % 9000L) / 90.0f + 10.0f;
-
     float angle = (float)node.index * 0.618f;
-    float x = cosf(angle) * hashPer;
-    float z = sinf(angle) * hashPer;
-    float y = hashPer * 0.2f - 10.0f;
-
-    node.pos = glm::vec3(x, y, z);
+    node.pos = glm::vec3(cosf(angle) * hashPer, hashPer * 0.2f - 10.0f, sinf(angle) * hashPer);
 }
 
 // ============================================================
 // ALBUM ORBIT LAYOUT - from NodeArtist::setChildOrbitRadii()
 // ============================================================
-void computeAlbumOrbits(ArtistNode& node, const ArtistData& artistData) {
+void computeAlbumOrbits(ArtistNode& node, const ArtistData& artistData, int artistIdx) {
     node.albumOrbits.clear();
-
     float orbitOffset = node.radiusInit * 1.25f;
     int albumIdx = 0;
-
     for (auto& album : artistData.albums) {
         ArtistNode::AlbumOrbit orbit;
         orbit.name = album.name;
         orbit.numTracks = (int)album.tracks.size();
-
-        // Original: amt = max(numTracks * 0.065, 0.2)
+        orbit.artistIndex = artistIdx;
+        orbit.albumIndex = albumIdx;
         float amt = std::max(orbit.numTracks * 0.065f, 0.2f);
         orbitOffset += amt;
         orbit.radius = orbitOffset;
-        orbit.angle = (float)albumIdx * 0.618f * M_PI * 2.0f;
+        orbit.angle = (float)albumIdx * 0.618f * (float)M_PI * 2.0f;
         orbit.speed = 0.15f / sqrtf(std::max(orbit.radius, 0.5f));
-
-        // Planet size from original
-        float totalLength = 0;
-        for (auto& t : album.tracks) totalLength += t.duration;
         orbit.planetSize = std::max(0.15f, 0.1f + sqrtf((float)orbit.numTracks) * 0.06f);
 
-        // Track moon orbits
         float trackOrbitR = orbit.planetSize * 3.0f;
         for (int ti = 0; ti < (int)album.tracks.size(); ti++) {
             ArtistNode::AlbumOrbit::TrackOrbit to;
             to.name = album.tracks[ti].title;
+            to.filePath = album.tracks[ti].filePath;
             to.duration = album.tracks[ti].duration;
             float moonSize = std::max(0.04f, 0.02f + 0.03f * (to.duration / 300.0f));
             trackOrbitR += moonSize * 2.0f;
             to.radius = trackOrbitR;
-            to.angle = (float)ti * 2.396f; // golden angle
-            to.speed = (2.0f * M_PI) / std::max(to.duration, 30.0f);
+            to.angle = (float)ti * 2.396f;
+            to.speed = (2.0f * (float)M_PI) / std::max(to.duration, 30.0f);
             to.size = moonSize;
             trackOrbitR += moonSize * 2.0f;
             orbit.tracks.push_back(to);
         }
-
         orbitOffset += amt;
         albumIdx++;
         node.albumOrbits.push_back(orbit);
     }
-
     node.idealCameraDist = std::max(orbitOffset * 2.6f, 8.0f);
 }
 
@@ -192,13 +209,13 @@ void computeAlbumOrbits(ArtistNode& node, const ArtistData& artistData) {
 // TEXTURE LOADING
 // ============================================================
 GLuint loadTexture(const std::string& path) {
+    std::string fullPath = resolvePath(path);
     int w, h, channels;
-    unsigned char* data = stbi_load(path.c_str(), &w, &h, &channels, 4);
+    unsigned char* data = stbi_load(fullPath.c_str(), &w, &h, &channels, 4);
     if (!data) {
-        std::cerr << "[Planetary] Failed to load texture: " << path << std::endl;
+        std::cerr << "[Planetary] Failed to load texture: " << fullPath << std::endl;
         return 0;
     }
-
     GLuint tex;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
@@ -208,224 +225,220 @@ GLuint loadTexture(const std::string& path) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
     stbi_image_free(data);
-    std::cout << "[Planetary] Loaded texture: " << path << " (" << w << "x" << h << ")" << std::endl;
+    std::cout << "[Planetary] Loaded: " << path << " (" << w << "x" << h << ")" << std::endl;
     return tex;
 }
 
 // ============================================================
-// SPHERE MESH - for planets/moons (original: BloomSphere)
+// SPHERE MESH
 // ============================================================
 struct SphereMesh {
     GLuint vao = 0, vbo = 0, ebo = 0;
     int indexCount = 0;
-
     void create(int stacks, int slices) {
         std::vector<float> verts;
         std::vector<unsigned int> indices;
-
         for (int i = 0; i <= stacks; i++) {
-            float phi = M_PI * (float)i / stacks;
+            float phi = (float)M_PI * (float)i / stacks;
             for (int j = 0; j <= slices; j++) {
-                float theta = 2.0f * M_PI * (float)j / slices;
-                float x = sinf(phi) * cosf(theta);
-                float y = cosf(phi);
-                float z = sinf(phi) * sinf(theta);
-                float u = (float)j / slices;
-                float v = (float)i / stacks;
-                // position
+                float theta = 2.0f * (float)M_PI * (float)j / slices;
+                float x = sinf(phi) * cosf(theta), y = cosf(phi), z = sinf(phi) * sinf(theta);
                 verts.push_back(x); verts.push_back(y); verts.push_back(z);
-                // normal
                 verts.push_back(x); verts.push_back(y); verts.push_back(z);
-                // texcoord
-                verts.push_back(u); verts.push_back(v);
+                verts.push_back((float)j / slices); verts.push_back((float)i / stacks);
             }
         }
-
-        for (int i = 0; i < stacks; i++) {
+        for (int i = 0; i < stacks; i++)
             for (int j = 0; j < slices; j++) {
-                int a = i * (slices + 1) + j;
-                int b = a + slices + 1;
+                int a = i * (slices + 1) + j, b = a + slices + 1;
                 indices.push_back(a); indices.push_back(b); indices.push_back(a + 1);
                 indices.push_back(b); indices.push_back(b + 1); indices.push_back(a + 1);
             }
-        }
-
         indexCount = (int)indices.size();
-
-        glGenVertexArrays(1, &vao);
-        glGenBuffers(1, &vbo);
-        glGenBuffers(1, &ebo);
-
+        glGenVertexArrays(1, &vao); glGenBuffers(1, &vbo); glGenBuffers(1, &ebo);
         glBindVertexArray(vao);
         glBindBuffer(GL_ARRAY_BUFFER, vbo);
         glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
-
-        // position
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
-        glEnableVertexAttribArray(0);
-        // normal
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
-        glEnableVertexAttribArray(1);
-        // texcoord
-        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
-        glEnableVertexAttribArray(2);
-
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0); glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3*sizeof(float))); glEnableVertexAttribArray(1);
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6*sizeof(float))); glEnableVertexAttribArray(2);
         glBindVertexArray(0);
     }
-
-    void draw() const {
-        glBindVertexArray(vao);
-        glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, 0);
-        glBindVertexArray(0);
-    }
+    void draw() const { glBindVertexArray(vao); glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, 0); glBindVertexArray(0); }
 };
 
 // ============================================================
-// RING MESH - for orbit rings
+// RING MESH
 // ============================================================
 struct RingMesh {
-    GLuint vao = 0, vbo = 0;
-    int vertCount = 0;
-
+    GLuint vao = 0, vbo = 0; int vertCount = 0;
     void create(float radius, int segments) {
         std::vector<float> verts;
         for (int i = 0; i <= segments; i++) {
-            float angle = 2.0f * M_PI * (float)i / segments;
-            verts.push_back(cosf(angle) * radius);
-            verts.push_back(0.0f);
-            verts.push_back(sinf(angle) * radius);
+            float a = 2.0f * (float)M_PI * (float)i / segments;
+            verts.push_back(cosf(a) * radius); verts.push_back(0); verts.push_back(sinf(a) * radius);
         }
         vertCount = segments + 1;
-
-        glGenVertexArrays(1, &vao);
-        glGenBuffers(1, &vbo);
-        glBindVertexArray(vao);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glGenVertexArrays(1, &vao); glGenBuffers(1, &vbo);
+        glBindVertexArray(vao); glBindBuffer(GL_ARRAY_BUFFER, vbo);
         glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), 0);
-        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3*sizeof(float), 0); glEnableVertexAttribArray(0);
         glBindVertexArray(0);
     }
-
-    void draw() const {
-        glBindVertexArray(vao);
-        glDrawArrays(GL_LINE_STRIP, 0, vertCount);
-        glBindVertexArray(0);
-    }
+    void draw() const { glBindVertexArray(vao); glDrawArrays(GL_LINE_STRIP, 0, vertCount); glBindVertexArray(0); }
 };
 
 // ============================================================
-// BACKGROUND STARS - from original Stars.cpp
+// BACKGROUND STARS
 // ============================================================
 struct BackgroundStars {
-    GLuint vao = 0, vbo = 0;
-    int count = 0;
-
-    void create(int numStars) {
-        count = numStars;
-        std::vector<float> data;
-        std::mt19937 rng(42);
-        std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-        std::uniform_real_distribution<float> bright(0.1f, 0.8f);
-
-        for (int i = 0; i < numStars; i++) {
-            // Random point on sphere
-            float x = dist(rng), y = dist(rng), z = dist(rng);
-            float len = sqrtf(x * x + y * y + z * z);
-            if (len < 0.001f) continue;
-            float r = 300.0f + dist(rng) * 200.0f;
-            x = x / len * r; y = y / len * r; z = z / len * r;
-
-            float b = bright(rng);
-            float sz = 0.5f + dist(rng) * 0.5f;
-
-            // pos (3), color (4), size (1)
-            data.push_back(x); data.push_back(y); data.push_back(z);
-            data.push_back(b * 0.8f); data.push_back(b * 0.85f); data.push_back(b); data.push_back(b * 0.6f);
-            data.push_back(sz);
+    GLuint vao = 0, vbo = 0; int count = 0;
+    void create(int n) {
+        count = n; std::vector<float> data;
+        std::mt19937 rng(42); std::uniform_real_distribution<float> d(-1,1), b(0.1f,0.8f);
+        for (int i = 0; i < n; i++) {
+            float x=d(rng),y=d(rng),z=d(rng); float len=sqrtf(x*x+y*y+z*z);
+            if(len<0.001f)continue; float r=300+d(rng)*200; x=x/len*r;y=y/len*r;z=z/len*r;
+            float br=b(rng);
+            data.push_back(x);data.push_back(y);data.push_back(z);
+            data.push_back(br*0.8f);data.push_back(br*0.85f);data.push_back(br);data.push_back(br*0.6f);
+            data.push_back(0.5f+d(rng)*0.5f);
         }
-
-        glGenVertexArrays(1, &vao);
-        glGenBuffers(1, &vbo);
-        glBindVertexArray(vao);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_STATIC_DRAW);
-
-        // pos
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), 0);
-        glEnableVertexAttribArray(0);
-        // color
-        glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
-        glEnableVertexAttribArray(1);
-        // size
-        glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(7 * sizeof(float)));
-        glEnableVertexAttribArray(2);
-
+        glGenVertexArrays(1,&vao);glGenBuffers(1,&vbo);glBindVertexArray(vao);glBindBuffer(GL_ARRAY_BUFFER,vbo);
+        glBufferData(GL_ARRAY_BUFFER,data.size()*sizeof(float),data.data(),GL_STATIC_DRAW);
+        glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,8*sizeof(float),0);glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1,4,GL_FLOAT,GL_FALSE,8*sizeof(float),(void*)(3*sizeof(float)));glEnableVertexAttribArray(1);
+        glVertexAttribPointer(2,1,GL_FLOAT,GL_FALSE,8*sizeof(float),(void*)(7*sizeof(float)));glEnableVertexAttribArray(2);
         glBindVertexArray(0);
     }
+    void draw() const { glBindVertexArray(vao); glDrawArrays(GL_POINTS, 0, count); glBindVertexArray(0); }
+};
 
-    void draw() const {
-        glBindVertexArray(vao);
-        glDrawArrays(GL_POINTS, 0, count);
+// ============================================================
+// BILLBOARD QUAD
+// ============================================================
+struct BillboardQuad {
+    GLuint vao=0, vbo=0;
+    void create() {
+        float v[]={0,0,0,0,0,1,1,1,1,1, 0,0,0,1,0,1,1,1,1,1, 0,0,0,1,1,1,1,1,1,1,
+                   0,0,0,0,0,1,1,1,1,1, 0,0,0,1,1,1,1,1,1,1, 0,0,0,0,1,1,1,1,1,1};
+        glGenVertexArrays(1,&vao);glGenBuffers(1,&vbo);glBindVertexArray(vao);glBindBuffer(GL_ARRAY_BUFFER,vbo);
+        glBufferData(GL_ARRAY_BUFFER,sizeof(v),v,GL_DYNAMIC_DRAW);
+        glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,10*sizeof(float),0);glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,10*sizeof(float),(void*)(3*sizeof(float)));glEnableVertexAttribArray(1);
+        glVertexAttribPointer(2,4,GL_FLOAT,GL_FALSE,10*sizeof(float),(void*)(5*sizeof(float)));glEnableVertexAttribArray(2);
+        glVertexAttribPointer(3,1,GL_FLOAT,GL_FALSE,10*sizeof(float),(void*)(9*sizeof(float)));glEnableVertexAttribArray(3);
         glBindVertexArray(0);
+    }
+    void draw(glm::vec3 p, glm::vec4 c, float s) {
+        float v[]={p.x,p.y,p.z,0,0,c.r,c.g,c.b,c.a,s, p.x,p.y,p.z,1,0,c.r,c.g,c.b,c.a,s,
+                   p.x,p.y,p.z,1,1,c.r,c.g,c.b,c.a,s, p.x,p.y,p.z,0,0,c.r,c.g,c.b,c.a,s,
+                   p.x,p.y,p.z,1,1,c.r,c.g,c.b,c.a,s, p.x,p.y,p.z,0,1,c.r,c.g,c.b,c.a,s};
+        glBindVertexArray(vao);glBindBuffer(GL_ARRAY_BUFFER,vbo);
+        glBufferSubData(GL_ARRAY_BUFFER,0,sizeof(v),v);glDrawArrays(GL_TRIANGLES,0,6);glBindVertexArray(0);
     }
 };
 
 // ============================================================
-// BILLBOARD QUAD - for star glows, atmospheres
+// AUDIO PLAYER - SDL2 audio for music playback
 // ============================================================
-struct BillboardQuad {
-    GLuint vao = 0, vbo = 0;
+struct AudioPlayer {
+    SDL_AudioDeviceID device = 0;
+    SDL_AudioSpec spec{};
+    Uint8* audioBuffer = nullptr;
+    Uint32 audioLength = 0;
+    Uint32 audioPos = 0;
+    bool playing = false;
+    float volume = 0.8f;
+    std::string currentTrack;
+    std::string currentTrackName;
+    std::string currentArtist;
+    std::string currentAlbum;
+    float duration = 0;
+    std::mutex mtx;
 
-    void create() {
-        // Single quad: we'll instance/reuse with uniforms
-        float verts[] = {
-            // pos(3), texcoord(2), color(4), size(1)
-            0,0,0, 0,0, 1,1,1,1, 1,
-            0,0,0, 1,0, 1,1,1,1, 1,
-            0,0,0, 1,1, 1,1,1,1, 1,
-            0,0,0, 0,0, 1,1,1,1, 1,
-            0,0,0, 1,1, 1,1,1,1, 1,
-            0,0,0, 0,1, 1,1,1,1, 1,
-        };
-
-        glGenVertexArrays(1, &vao);
-        glGenBuffers(1, &vbo);
-        glBindVertexArray(vao);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
-
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 10 * sizeof(float), 0);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 10 * sizeof(float), (void*)(3 * sizeof(float)));
-        glEnableVertexAttribArray(1);
-        glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 10 * sizeof(float), (void*)(5 * sizeof(float)));
-        glEnableVertexAttribArray(2);
-        glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, 10 * sizeof(float), (void*)(9 * sizeof(float)));
-        glEnableVertexAttribArray(3);
-
-        glBindVertexArray(0);
+    void init() {
+        SDL_AudioSpec want{};
+        want.freq = 44100;
+        want.format = AUDIO_S16LSB;
+        want.channels = 2;
+        want.samples = 4096;
+        want.callback = audioCallback;
+        want.userdata = this;
+        device = SDL_OpenAudioDevice(nullptr, 0, &want, &spec, 0);
+        if (device == 0) {
+            std::cerr << "[Audio] Failed to open: " << SDL_GetError() << std::endl;
+        }
     }
 
-    void draw(glm::vec3 pos, glm::vec4 color, float size) {
-        float verts[] = {
-            pos.x,pos.y,pos.z, 0,0, color.r,color.g,color.b,color.a, size,
-            pos.x,pos.y,pos.z, 1,0, color.r,color.g,color.b,color.a, size,
-            pos.x,pos.y,pos.z, 1,1, color.r,color.g,color.b,color.a, size,
-            pos.x,pos.y,pos.z, 0,0, color.r,color.g,color.b,color.a, size,
-            pos.x,pos.y,pos.z, 1,1, color.r,color.g,color.b,color.a, size,
-            pos.x,pos.y,pos.z, 0,1, color.r,color.g,color.b,color.a, size,
-        };
+    static void audioCallback(void* userdata, Uint8* stream, int len) {
+        auto* self = (AudioPlayer*)userdata;
+        std::lock_guard<std::mutex> lock(self->mtx);
+        SDL_memset(stream, 0, len);
+        if (!self->playing || !self->audioBuffer) return;
+        Uint32 remaining = self->audioLength - self->audioPos;
+        Uint32 toPlay = std::min((Uint32)len, remaining);
+        SDL_MixAudioFormat(stream, self->audioBuffer + self->audioPos,
+            self->spec.format, toPlay, (int)(self->volume * SDL_MIX_MAXVOLUME));
+        self->audioPos += toPlay;
+        if (self->audioPos >= self->audioLength) {
+            self->playing = false;
+        }
+    }
 
-        glBindVertexArray(vao);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(verts), verts);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
-        glBindVertexArray(0);
+    bool loadWav(const std::string& path) {
+        std::lock_guard<std::mutex> lock(mtx);
+        if (audioBuffer) { SDL_FreeWAV(audioBuffer); audioBuffer = nullptr; }
+        SDL_AudioSpec wavSpec;
+        if (!SDL_LoadWAV(path.c_str(), &wavSpec, &audioBuffer, &audioLength)) {
+            std::cerr << "[Audio] Can't load WAV: " << path << " - " << SDL_GetError() << std::endl;
+            return false;
+        }
+        audioPos = 0;
+        playing = true;
+        SDL_PauseAudioDevice(device, 0);
+        return true;
+    }
+
+    void play(const std::string& path, const std::string& name, const std::string& artist, const std::string& album, float dur) {
+        currentTrack = path;
+        currentTrackName = name;
+        currentArtist = artist;
+        currentAlbum = album;
+        duration = dur;
+        // Try to load as WAV (SDL2 native format)
+        if (!loadWav(path)) {
+            std::cout << "[Audio] WAV load failed for: " << name << " (non-WAV files need SDL2_mixer)" << std::endl;
+        }
+    }
+
+    void togglePause() {
+        playing = !playing;
+        SDL_PauseAudioDevice(device, playing ? 0 : 1);
+    }
+
+    void stop() {
+        std::lock_guard<std::mutex> lock(mtx);
+        playing = false;
+        SDL_PauseAudioDevice(device, 1);
+    }
+
+    float progress() const {
+        if (audioLength == 0) return 0;
+        return (float)audioPos / (float)audioLength;
+    }
+
+    float currentTime() const {
+        return progress() * duration;
+    }
+
+    void cleanup() {
+        stop();
+        if (audioBuffer) SDL_FreeWAV(audioBuffer);
+        if (device) SDL_CloseAudioDevice(device);
     }
 };
 
@@ -444,26 +457,23 @@ struct App {
     int currentLevel = G_ALPHA_LEVEL;
     int selectedArtist = -1;
     int selectedAlbum = -1;
+    std::string searchQuery;
 
     // Rendering
-    Shader starPointShader;
-    Shader billboardShader;
-    Shader planetShader;
-    Shader ringShader;
-
-    GLuint texStarGlow = 0;
-    GLuint texAtmosphere = 0;
-    GLuint texStar = 0;
-    GLuint texSurface = 0;
-
+    Shader starPointShader, billboardShader, planetShader, ringShader;
+    GLuint texStarGlow=0, texAtmosphere=0, texStar=0, texSurface=0;
     BackgroundStars bgStars;
     BillboardQuad billboard;
     SphereMesh sphereHi, sphereMd, sphereLo;
     RingMesh unitRing;
 
+    // Audio
+    AudioPlayer audio;
+
     float elapsedTime = 0;
     bool mouseDown = false;
     int mouseButton = 0;
+    bool imguiWantsMouse = false;
 
     // Loading state
     std::atomic<bool> libraryLoaded{false};
@@ -471,16 +481,18 @@ struct App {
     std::atomic<int> scanProgress{0};
     std::atomic<int> scanTotal{0};
     std::string musicPath;
+    std::string statusMsg;
 };
 
 // ============================================================
-// INITIALIZATION
+// INIT
 // ============================================================
 bool initSDL(App& app) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0) {
         std::cerr << "SDL init failed: " << SDL_GetError() << std::endl;
         return false;
     }
+    initBasePath();
 
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
@@ -488,52 +500,69 @@ bool initSDL(App& app) {
     SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
     SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, 4);
 
-    app.window = SDL_CreateWindow(
-        "Planetary",
+    app.window = SDL_CreateWindow("Planetary",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         app.screenW, app.screenH,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_SHOWN
-    );
-
-    if (!app.window) {
-        std::cerr << "Window creation failed: " << SDL_GetError() << std::endl;
-        return false;
-    }
+        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_SHOWN | SDL_WINDOW_MAXIMIZED);
+    if (!app.window) { std::cerr << "Window failed: " << SDL_GetError() << std::endl; return false; }
 
     app.glContext = SDL_GL_CreateContext(app.window);
-    if (!app.glContext) {
-        std::cerr << "GL context failed: " << SDL_GetError() << std::endl;
-        return false;
-    }
+    if (!app.glContext) { std::cerr << "GL context failed: " << SDL_GetError() << std::endl; return false; }
+    SDL_GL_SetSwapInterval(1);
 
-    SDL_GL_SetSwapInterval(1); // vsync
+    // Get actual window size after maximize
+    SDL_GetWindowSize(app.window, &app.screenW, &app.screenH);
+    app.camera.aspect = (float)app.screenW / (float)app.screenH;
 
     glewExperimental = GL_TRUE;
-    if (glewInit() != GLEW_OK) {
-        std::cerr << "GLEW init failed" << std::endl;
-        return false;
-    }
+    if (glewInit() != GLEW_OK) { std::cerr << "GLEW init failed" << std::endl; return false; }
 
     std::cout << "[Planetary] OpenGL " << glGetString(GL_VERSION) << std::endl;
-    std::cout << "[Planetary] Renderer: " << glGetString(GL_RENDERER) << std::endl;
+    std::cout << "[Planetary] GPU: " << glGetString(GL_RENDERER) << std::endl;
+
+    // Init Dear ImGui
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    ImGui::StyleColorsDark();
+
+    // Style - dark space theme
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.WindowRounding = 8.0f;
+    style.FrameRounding = 4.0f;
+    style.GrabRounding = 4.0f;
+    style.WindowBorderSize = 0.0f;
+    style.WindowPadding = ImVec2(12, 12);
+    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.0f, 0.0f, 0.02f, 0.85f);
+    style.Colors[ImGuiCol_TitleBg] = ImVec4(0.0f, 0.05f, 0.1f, 0.9f);
+    style.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.05f, 0.15f, 0.25f, 0.9f);
+    style.Colors[ImGuiCol_Button] = ImVec4(0.1f, 0.25f, 0.4f, 0.8f);
+    style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.15f, 0.35f, 0.55f, 0.9f);
+    style.Colors[ImGuiCol_SliderGrab] = ImVec4(0.4f, 0.8f, 1.0f, 0.8f);
+    style.Colors[ImGuiCol_FrameBg] = ImVec4(0.05f, 0.1f, 0.15f, 0.8f);
+    style.Colors[ImGuiCol_Text] = ImVec4(0.8f, 0.9f, 1.0f, 1.0f);
+
+    ImGui_ImplSDL2_InitForOpenGL(app.window, app.glContext);
+    ImGui_ImplOpenGL3_Init("#version 330");
+
+    // Init audio
+    app.audio.init();
 
     return true;
 }
 
 bool initResources(App& app) {
-    // Shaders
-    if (!app.starPointShader.load("shaders/star_points.vert", "shaders/star_points.frag")) return false;
-    if (!app.billboardShader.load("shaders/billboard.vert", "shaders/billboard.frag")) return false;
-    if (!app.planetShader.load("shaders/planet.vert", "shaders/planet.frag")) return false;
-    if (!app.ringShader.load("shaders/orbit_ring.vert", "shaders/orbit_ring.frag")) return false;
+    if (!app.starPointShader.load(resolvePath("shaders/star_points.vert"), resolvePath("shaders/star_points.frag"))) return false;
+    if (!app.billboardShader.load(resolvePath("shaders/billboard.vert"), resolvePath("shaders/billboard.frag"))) return false;
+    if (!app.planetShader.load(resolvePath("shaders/planet.vert"), resolvePath("shaders/planet.frag"))) return false;
+    if (!app.ringShader.load(resolvePath("shaders/orbit_ring.vert"), resolvePath("shaders/orbit_ring.frag"))) return false;
 
-    // Textures from original Planetary
     app.texStarGlow = loadTexture("resources/starGlow.png");
     app.texAtmosphere = loadTexture("resources/atmosphere.png");
     app.texStar = loadTexture("resources/star.png");
     app.texSurface = loadTexture("resources/surfacesLowRes.png");
 
-    // Meshes
     app.bgStars.create(5000);
     app.billboard.create();
     app.sphereHi.create(32, 32);
@@ -541,49 +570,39 @@ bool initResources(App& app) {
     app.sphereLo.create(8, 8);
     app.unitRing.create(1.0f, 128);
 
-    // OpenGL state
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_PROGRAM_POINT_SIZE);
     glEnable(GL_MULTISAMPLE);
     glClearColor(0.0f, 0.0f, 0.02f, 1.0f);
-
     return true;
 }
 
 // ============================================================
-// BUILD SCENE FROM MUSIC LIBRARY
+// BUILD SCENE
 // ============================================================
 void buildScene(App& app) {
     app.artistNodes.clear();
-
     int total = (int)app.library.artists.size();
     for (int i = 0; i < total; i++) {
         ArtistNode node;
         node.index = i;
         node.name = app.library.artists[i].name;
         node.totalTracks = app.library.artists[i].totalTracks;
-
         computeArtistColor(node);
         computeArtistPosition(node, total);
-        computeAlbumOrbits(node, app.library.artists[i]);
-
+        computeAlbumOrbits(node, app.library.artists[i], i);
         node.glowRadius = node.radiusInit * (0.8f + std::min(node.totalTracks / 30.0f, 1.0f) * 1.2f);
-
         app.artistNodes.push_back(node);
     }
-
-    // Initial camera distance based on galaxy size
     float maxR = 0;
-    for (auto& n : app.artistNodes) {
-        float r = glm::length(n.pos);
-        if (r > maxR) maxR = r;
-    }
+    for (auto& n : app.artistNodes) maxR = std::max(maxR, glm::length(n.pos));
     app.camera.targetOrbitDist = std::max(maxR * 1.5f, 50.0f);
     app.camera.orbitDist = app.camera.targetOrbitDist;
-
-    std::cout << "[Planetary] Built scene with " << app.artistNodes.size() << " stars" << std::endl;
+    app.statusMsg = std::to_string(total) + " artists, " +
+                    std::to_string(app.library.totalAlbums) + " albums, " +
+                    std::to_string(app.library.totalTracks) + " tracks";
 }
 
 // ============================================================
@@ -591,14 +610,12 @@ void buildScene(App& app) {
 // ============================================================
 void render(App& app) {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
     glm::mat4 view = app.camera.viewMatrix();
     glm::mat4 proj = app.camera.projMatrix();
 
-    // --- Background stars (point sprites with glow texture) ---
+    // Background stars
     glDepthMask(GL_FALSE);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE); // Additive blending for stars
-
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
     app.starPointShader.use();
     app.starPointShader.setMat4("uView", glm::value_ptr(view));
     app.starPointShader.setMat4("uProjection", glm::value_ptr(proj));
@@ -607,303 +624,377 @@ void render(App& app) {
     app.starPointShader.setInt("uTexture", 0);
     app.bgStars.draw();
 
-    // --- Artist star glows (billboarded sprites) ---
-    // Original: drawStarGlow() - 15x radius billboard with glow texture
+    // Star glows
     app.billboardShader.use();
     app.billboardShader.setMat4("uView", glm::value_ptr(view));
     app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
-    app.billboardShader.setVec2("uScreenSize", (float)app.screenW, (float)app.screenH);
-
     glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-    app.billboardShader.setInt("uTexture", 0);
-
-    for (auto& node : app.artistNodes) {
-        float pulse = 1.0f + sinf(app.elapsedTime * 1.5f + (float)node.index) * 0.08f;
-        float glowSize = node.glowRadius * 15.0f * pulse;
-        float alpha = 0.5f;
-        if (node.isSelected) {
-            alpha = 0.7f;
-            glowSize *= 1.3f;
-        }
-
-        app.billboard.draw(node.pos,
-            glm::vec4(node.glowColor, alpha),
-            glowSize);
+    for (auto& n : app.artistNodes) {
+        float pulse = 1.0f + sinf(app.elapsedTime * 1.5f + (float)n.index) * 0.08f;
+        float sz = n.glowRadius * 15.0f * pulse * (n.isSelected ? 1.3f : 1.0f);
+        app.billboard.draw(n.pos, glm::vec4(n.glowColor, n.isSelected ? 0.7f : 0.5f), sz);
     }
-
     glDepthMask(GL_TRUE);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    // --- Artist star cores (small lit spheres) ---
-    // Original: drawPlanet() - 0.16x radius sphere
+    // Star cores
     app.planetShader.use();
     app.planetShader.setMat4("uView", glm::value_ptr(view));
     app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
-    app.planetShader.setVec3("uLightPos", 0.0f, 50.0f, 0.0f);
-
+    app.planetShader.setVec3("uLightPos", 0, 50, 0);
     glBindTexture(GL_TEXTURE_2D, app.texSurface);
-    app.planetShader.setInt("uTexture", 0);
-
-    for (auto& node : app.artistNodes) {
-        float coreSize = node.radius * 0.16f;
-        glm::mat4 model = glm::translate(glm::mat4(1.0f), node.pos);
-        model = glm::rotate(model, app.elapsedTime * 0.5f, glm::vec3(0, 1, 0));
-        model = glm::scale(model, glm::vec3(coreSize));
-
-        app.planetShader.setMat4("uModel", glm::value_ptr(model));
-        app.planetShader.setVec3("uColor", node.color.r, node.color.g, node.color.b);
-        app.planetShader.setVec3("uEmissive", node.color.r, node.color.g, node.color.b);
+    for (auto& n : app.artistNodes) {
+        float cs = n.radius * 0.16f;
+        glm::mat4 m = glm::translate(glm::mat4(1.0f), n.pos);
+        m = glm::rotate(m, app.elapsedTime * 0.5f, glm::vec3(0,1,0));
+        m = glm::scale(m, glm::vec3(cs));
+        app.planetShader.setMat4("uModel", glm::value_ptr(m));
+        app.planetShader.setVec3("uColor", n.color.r, n.color.g, n.color.b);
+        app.planetShader.setVec3("uEmissive", n.color.r, n.color.g, n.color.b);
         app.planetShader.setFloat("uEmissiveStrength", 0.3f);
-
         app.sphereLo.draw();
     }
 
-    // --- Selected artist: album planets + orbit rings ---
+    // Selected artist: orbit rings + planets
     if (app.selectedArtist >= 0 && app.selectedArtist < (int)app.artistNodes.size()) {
         auto& star = app.artistNodes[app.selectedArtist];
 
-        // Orbit rings
         app.ringShader.use();
         app.ringShader.setMat4("uView", glm::value_ptr(view));
         app.ringShader.setMat4("uProjection", glm::value_ptr(proj));
-
-        for (auto& orbit : star.albumOrbits) {
-            glm::mat4 model = glm::translate(glm::mat4(1.0f), star.pos);
-            model = glm::scale(model, glm::vec3(orbit.radius));
-            app.ringShader.setMat4("uModel", glm::value_ptr(model));
+        for (auto& o : star.albumOrbits) {
+            glm::mat4 rm = glm::translate(glm::mat4(1.0f), star.pos);
+            rm = glm::scale(rm, glm::vec3(o.radius));
+            app.ringShader.setMat4("uModel", glm::value_ptr(rm));
             app.ringShader.setVec4("uColor", BRIGHT_BLUE.r, BRIGHT_BLUE.g, BRIGHT_BLUE.b, 0.15f);
             app.unitRing.draw();
         }
 
-        // Album planets
         app.planetShader.use();
+        app.planetShader.setMat4("uView", glm::value_ptr(view));
+        app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
         glBindTexture(GL_TEXTURE_2D, app.texSurface);
 
-        for (auto& orbit : star.albumOrbits) {
-            float angle = orbit.angle + app.elapsedTime * orbit.speed;
-            glm::vec3 albumPos = star.pos + glm::vec3(
-                cosf(angle) * orbit.radius,
-                0.0f,
-                sinf(angle) * orbit.radius
-            );
+        for (int ai = 0; ai < (int)star.albumOrbits.size(); ai++) {
+            auto& o = star.albumOrbits[ai];
+            float angle = o.angle + app.elapsedTime * o.speed;
+            glm::vec3 apos = star.pos + glm::vec3(cosf(angle)*o.radius, 0, sinf(angle)*o.radius);
 
-            glm::mat4 model = glm::translate(glm::mat4(1.0f), albumPos);
-            model = glm::rotate(model, app.elapsedTime * 0.3f, glm::vec3(0, 1, 0));
-            model = glm::scale(model, glm::vec3(orbit.planetSize));
-
-            float planetHue = star.hue + 0.015f;
-            glm::vec3 planetColor = star.color * 0.9f;
-
-            app.planetShader.setMat4("uModel", glm::value_ptr(model));
-            app.planetShader.setVec3("uColor", planetColor.r, planetColor.g, planetColor.b);
-            app.planetShader.setVec3("uLightPos", star.pos.x, star.pos.y + 2.0f, star.pos.z);
-            app.planetShader.setVec3("uEmissive", planetColor.r, planetColor.g, planetColor.b);
-            app.planetShader.setFloat("uEmissiveStrength", 0.15f);
-
+            glm::mat4 pm = glm::translate(glm::mat4(1.0f), apos);
+            pm = glm::rotate(pm, app.elapsedTime * 0.3f, glm::vec3(0,1,0));
+            pm = glm::scale(pm, glm::vec3(o.planetSize));
+            app.planetShader.setMat4("uModel", glm::value_ptr(pm));
+            app.planetShader.setVec3("uColor", star.color.r*0.9f, star.color.g*0.9f, star.color.b*0.9f);
+            app.planetShader.setVec3("uLightPos", star.pos.x, star.pos.y+2, star.pos.z);
+            app.planetShader.setVec3("uEmissive", star.color.r, star.color.g, star.color.b);
+            app.planetShader.setFloat("uEmissiveStrength", ai == app.selectedAlbum ? 0.4f : 0.15f);
             app.sphereMd.draw();
 
-            // Atmosphere glow
-            glDepthMask(GL_FALSE);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+            // Atmosphere
+            glDepthMask(GL_FALSE); glBlendFunc(GL_SRC_ALPHA, GL_ONE);
             app.billboardShader.use();
             app.billboardShader.setMat4("uView", glm::value_ptr(view));
             app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
             glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
-            app.billboard.draw(albumPos,
-                glm::vec4(star.glowColor, 0.25f),
-                orbit.planetSize * 4.84f);
-            glDepthMask(GL_TRUE);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            app.billboard.draw(apos, glm::vec4(star.glowColor, 0.25f), o.planetSize * 4.84f);
+            glDepthMask(GL_TRUE); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-            // Track moons (only for selected album)
-            if (app.selectedAlbum >= 0) {
-                int albumIdx = 0;
-                for (auto& ao : star.albumOrbits) {
-                    if (albumIdx == app.selectedAlbum) {
-                        // Draw track orbit rings
-                        app.ringShader.use();
-                        app.ringShader.setMat4("uView", glm::value_ptr(view));
-                        app.ringShader.setMat4("uProjection", glm::value_ptr(proj));
-
-                        for (auto& track : ao.tracks) {
-                            glm::mat4 rm = glm::translate(glm::mat4(1.0f), albumPos);
-                            rm = glm::scale(rm, glm::vec3(track.radius));
-                            app.ringShader.setMat4("uModel", glm::value_ptr(rm));
-                            app.ringShader.setVec4("uColor", BRIGHT_BLUE.r, BRIGHT_BLUE.g, BRIGHT_BLUE.b, 0.08f);
-                            app.unitRing.draw();
-                        }
-
-                        // Draw track moons
-                        app.planetShader.use();
-                        glBindTexture(GL_TEXTURE_2D, app.texSurface);
-                        for (auto& track : ao.tracks) {
-                            float ta = track.angle + app.elapsedTime * track.speed;
-                            glm::vec3 moonPos = albumPos + glm::vec3(
-                                cosf(ta) * track.radius, 0, sinf(ta) * track.radius);
-
-                            glm::mat4 mm = glm::translate(glm::mat4(1.0f), moonPos);
-                            mm = glm::scale(mm, glm::vec3(track.size));
-                            app.planetShader.setMat4("uModel", glm::value_ptr(mm));
-                            app.planetShader.setVec3("uColor", star.color.r, star.color.g, star.color.b);
-                            app.planetShader.setVec3("uEmissive", star.color.r, star.color.g, star.color.b);
-                            app.planetShader.setFloat("uEmissiveStrength", 0.2f);
-                            app.sphereLo.draw();
-                        }
-                        break;
-                    }
-                    albumIdx++;
+            // Track moons for selected album
+            if (ai == app.selectedAlbum) {
+                app.ringShader.use();
+                app.ringShader.setMat4("uView", glm::value_ptr(view));
+                app.ringShader.setMat4("uProjection", glm::value_ptr(proj));
+                for (auto& t : o.tracks) {
+                    glm::mat4 trm = glm::translate(glm::mat4(1.0f), apos);
+                    trm = glm::scale(trm, glm::vec3(t.radius));
+                    app.ringShader.setMat4("uModel", glm::value_ptr(trm));
+                    app.ringShader.setVec4("uColor", BRIGHT_BLUE.r, BRIGHT_BLUE.g, BRIGHT_BLUE.b, 0.08f);
+                    app.unitRing.draw();
+                }
+                app.planetShader.use();
+                app.planetShader.setMat4("uView", glm::value_ptr(view));
+                app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
+                glBindTexture(GL_TEXTURE_2D, app.texSurface);
+                for (auto& t : o.tracks) {
+                    float ta = t.angle + app.elapsedTime * t.speed;
+                    glm::vec3 mp = apos + glm::vec3(cosf(ta)*t.radius, 0, sinf(ta)*t.radius);
+                    glm::mat4 mm = glm::translate(glm::mat4(1.0f), mp);
+                    mm = glm::scale(mm, glm::vec3(t.size));
+                    app.planetShader.setMat4("uModel", glm::value_ptr(mm));
+                    app.planetShader.setVec3("uColor", star.color.r, star.color.g, star.color.b);
+                    app.planetShader.setVec3("uEmissive", star.color.r, star.color.g, star.color.b);
+                    app.planetShader.setFloat("uEmissiveStrength", 0.2f);
+                    app.sphereLo.draw();
                 }
             }
-
-            // Restore planet shader for next planet
+            // Restore shader state
             app.planetShader.use();
             app.planetShader.setMat4("uView", glm::value_ptr(view));
             app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
             glBindTexture(GL_TEXTURE_2D, app.texSurface);
         }
     }
-
-    SDL_GL_SwapWindow(app.window);
 }
 
 // ============================================================
-// HIT TESTING - find which star was clicked
+// UI OVERLAY (Dear ImGui)
+// ============================================================
+void renderUI(App& app) {
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplSDL2_NewFrame();
+    ImGui::NewFrame();
+
+    // Top bar - title & status
+    ImGui::SetNextWindowPos(ImVec2(10, 10));
+    ImGui::SetNextWindowSize(ImVec2(350, 0));
+    ImGui::Begin("##topbar", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_AlwaysAutoResize);
+
+    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "PLANETARY");
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.6f, 1.0f), "Native");
+
+    if (!app.statusMsg.empty()) {
+        ImGui::TextColored(ImVec4(0.5f, 0.6f, 0.7f, 0.8f), "%s", app.statusMsg.c_str());
+    }
+
+    if (app.scanning) {
+        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Scanning... %d / %d",
+            app.scanProgress.load(), app.scanTotal.load());
+    }
+
+    // Search
+    if (app.artistNodes.size() > 0) {
+        static char searchBuf[256] = "";
+        ImGui::SetNextItemWidth(320);
+        ImGui::InputTextWithHint("##search", "Search artists...", searchBuf, sizeof(searchBuf));
+        app.searchQuery = searchBuf;
+    }
+
+    // Selected artist info
+    if (app.selectedArtist >= 0 && app.selectedArtist < (int)app.artistNodes.size()) {
+        auto& star = app.artistNodes[app.selectedArtist];
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(star.color.r, star.color.g, star.color.b, 1.0f),
+            "%s", star.name.c_str());
+        ImGui::TextColored(ImVec4(0.5f, 0.6f, 0.7f, 0.8f),
+            "%d albums, %d tracks", (int)star.albumOrbits.size(), star.totalTracks);
+
+        // Album list
+        for (int i = 0; i < (int)star.albumOrbits.size(); i++) {
+            auto& album = star.albumOrbits[i];
+            bool selected = (i == app.selectedAlbum);
+            if (ImGui::Selectable(album.name.c_str(), selected)) {
+                app.selectedAlbum = (app.selectedAlbum == i) ? -1 : i;
+                app.currentLevel = (app.selectedAlbum >= 0) ? G_ALBUM_LEVEL : G_ARTIST_LEVEL;
+            }
+
+            // Track list for selected album
+            if (i == app.selectedAlbum) {
+                ImGui::Indent(16);
+                for (int t = 0; t < (int)album.tracks.size(); t++) {
+                    auto& track = album.tracks[t];
+                    int mins = (int)track.duration / 60;
+                    int secs = (int)track.duration % 60;
+                    char label[256];
+                    snprintf(label, sizeof(label), "%d. %s  (%d:%02d)",
+                        t + 1, track.name.c_str(), mins, secs);
+
+                    bool isPlaying = (app.audio.currentTrack == track.filePath && app.audio.playing);
+                    if (isPlaying) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.8f, 1.0f, 1.0f));
+
+                    if (ImGui::Selectable(label, isPlaying)) {
+                        app.audio.play(track.filePath, track.name, star.name, album.name, track.duration);
+                    }
+
+                    if (isPlaying) ImGui::PopStyleColor();
+                }
+                ImGui::Unindent(16);
+            }
+        }
+    }
+    ImGui::End();
+
+    // Bottom bar - Now Playing
+    if (!app.audio.currentTrackName.empty()) {
+        float barH = 60;
+        ImGui::SetNextWindowPos(ImVec2(0, (float)app.screenH - barH));
+        ImGui::SetNextWindowSize(ImVec2((float)app.screenW, barH));
+        ImGui::Begin("##nowplaying", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
+
+        // Play/pause button
+        if (ImGui::Button(app.audio.playing ? "||" : ">", ImVec2(30, 30))) {
+            app.audio.togglePause();
+        }
+        ImGui::SameLine();
+
+        // Track info
+        ImGui::BeginGroup();
+        ImGui::TextColored(ImVec4(1, 1, 1, 1), "%s", app.audio.currentTrackName.c_str());
+        ImGui::TextColored(ImVec4(0.5f, 0.6f, 0.7f, 0.8f), "%s - %s",
+            app.audio.currentArtist.c_str(), app.audio.currentAlbum.c_str());
+        ImGui::EndGroup();
+
+        ImGui::SameLine(300);
+
+        // Progress bar
+        float prog = app.audio.progress();
+        float ct = app.audio.currentTime();
+        int cm = (int)ct / 60, cs = (int)ct % 60;
+        int dm = (int)app.audio.duration / 60, ds = (int)app.audio.duration % 60;
+        char timeStr[64];
+        snprintf(timeStr, sizeof(timeStr), "%d:%02d / %d:%02d", cm, cs, dm, ds);
+
+        ImGui::SetNextItemWidth((float)app.screenW - 500);
+        ImGui::ProgressBar(prog, ImVec2(-1, 14), timeStr);
+
+        // Volume
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(80);
+        ImGui::SliderFloat("##vol", &app.audio.volume, 0.0f, 1.0f, "");
+
+        ImGui::End();
+    }
+
+    // Welcome screen (no library loaded)
+    if (app.artistNodes.empty() && !app.scanning) {
+        ImGui::SetNextWindowPos(ImVec2(app.screenW * 0.5f, app.screenH * 0.5f), 0, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(400, 200));
+        ImGui::Begin("##welcome", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
+
+        ImGui::SetCursorPosX((400 - ImGui::CalcTextSize("PLANETARY").x * 2) / 2);
+        ImGui::SetWindowFontScale(2.0f);
+        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "PLANETARY");
+        ImGui::SetWindowFontScale(1.0f);
+
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.6f, 0.8f), "Visualize your music as a universe");
+        ImGui::Spacing(); ImGui::Spacing();
+
+        ImGui::TextColored(ImVec4(0.6f, 0.7f, 0.8f, 1.0f), "Drag a music folder onto this window");
+        ImGui::TextColored(ImVec4(0.4f, 0.5f, 0.6f, 0.6f), "or launch with: planetary.exe <folder>");
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.3f, 0.4f, 0.5f, 0.5f), "Supports MP3, FLAC, M4A, AAC, OGG, WAV");
+        ImGui::End();
+    }
+
+    // GPU info (bottom right)
+    ImGui::SetNextWindowPos(ImVec2((float)app.screenW - 10, 10), 0, ImVec2(1.0f, 0.0f));
+    ImGui::Begin("##gpu", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs);
+    ImGui::TextColored(ImVec4(0.3f, 0.4f, 0.5f, 0.5f), "%s", (const char*)glGetString(GL_RENDERER));
+    ImGui::End();
+
+    app.imguiWantsMouse = ImGui::GetIO().WantCaptureMouse;
+
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+}
+
+// ============================================================
+// HIT TEST
 // ============================================================
 int hitTestStar(App& app, int mx, int my) {
     glm::mat4 view = app.camera.viewMatrix();
     glm::mat4 proj = app.camera.projMatrix();
-
-    float bestDist = 999999.0f;
-    int bestIdx = -1;
-
+    float bestDist = 999999; int bestIdx = -1;
     for (int i = 0; i < (int)app.artistNodes.size(); i++) {
-        auto& node = app.artistNodes[i];
-        glm::vec4 clip = proj * view * glm::vec4(node.pos, 1.0f);
+        auto& n = app.artistNodes[i];
+        // Filter by search
+        if (!app.searchQuery.empty()) {
+            std::string lower = n.name;
+            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+            std::string q = app.searchQuery;
+            std::transform(q.begin(), q.end(), q.begin(), ::tolower);
+            if (lower.find(q) == std::string::npos) continue;
+        }
+        glm::vec4 clip = proj * view * glm::vec4(n.pos, 1);
         if (clip.w <= 0) continue;
         glm::vec3 ndc = glm::vec3(clip) / clip.w;
         float sx = (ndc.x * 0.5f + 0.5f) * app.screenW;
         float sy = (1.0f - (ndc.y * 0.5f + 0.5f)) * app.screenH;
-
-        float dx = sx - mx;
-        float dy = sy - my;
-        float screenDist = sqrtf(dx * dx + dy * dy);
-
-        // Hit radius based on glow size (proportional to screen projection)
-        float hitR = std::max(20.0f, node.glowRadius * 5.0f / std::max(clip.w * 0.1f, 0.1f));
-
-        if (screenDist < hitR && screenDist < bestDist) {
-            bestDist = screenDist;
-            bestIdx = i;
-        }
+        float d = sqrtf((sx-mx)*(sx-mx) + (sy-my)*(sy-my));
+        float hitR = std::max(20.0f, n.glowRadius * 5.0f / std::max(clip.w * 0.1f, 0.1f));
+        if (d < hitR && d < bestDist) { bestDist = d; bestIdx = i; }
     }
-
     return bestIdx;
 }
 
 // ============================================================
-// EVENT HANDLING
+// EVENTS
 // ============================================================
 void handleEvents(App& app) {
-    SDL_Event event;
-    while (SDL_PollEvent(&event)) {
-        switch (event.type) {
-        case SDL_QUIT:
-            app.running = false;
-            break;
-
+    SDL_Event ev;
+    while (SDL_PollEvent(&ev)) {
+        ImGui_ImplSDL2_ProcessEvent(&ev);
+        switch (ev.type) {
+        case SDL_QUIT: app.running = false; break;
         case SDL_WINDOWEVENT:
-            if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-                app.screenW = event.window.data1;
-                app.screenH = event.window.data2;
+            if (ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                app.screenW = ev.window.data1; app.screenH = ev.window.data2;
                 app.camera.aspect = (float)app.screenW / (float)app.screenH;
                 glViewport(0, 0, app.screenW, app.screenH);
             }
             break;
-
         case SDL_MOUSEBUTTONDOWN:
-            app.mouseDown = true;
-            app.mouseButton = event.button.button;
-
-            if (event.button.button == SDL_BUTTON_LEFT) {
-                int hit = hitTestStar(app, event.button.x, event.button.y);
-                if (hit >= 0) {
-                    // Deselect previous
-                    if (app.selectedArtist >= 0)
-                        app.artistNodes[app.selectedArtist].isSelected = false;
-
-                    if (hit == app.selectedArtist) {
-                        // Clicked same star - deselect
-                        app.selectedArtist = -1;
-                        app.selectedAlbum = -1;
-                        app.currentLevel = G_ALPHA_LEVEL;
-                        app.camera.autoRotate = true;
-
-                        // Zoom back out
-                        float maxR = 0;
-                        for (auto& n : app.artistNodes)
-                            maxR = std::max(maxR, glm::length(n.pos));
-                        app.camera.flyTo(glm::vec3(0), maxR * 1.5f);
-                    } else {
-                        // Select new star
-                        app.selectedArtist = hit;
-                        app.artistNodes[hit].isSelected = true;
-                        app.currentLevel = G_ARTIST_LEVEL;
-                        app.camera.autoRotate = false;
-
-                        // Fly to star
-                        auto& node = app.artistNodes[hit];
-                        app.camera.flyTo(node.pos, node.idealCameraDist);
+            if (!app.imguiWantsMouse) {
+                app.mouseDown = true; app.mouseButton = ev.button.button;
+                if (ev.button.button == SDL_BUTTON_LEFT) {
+                    int hit = hitTestStar(app, ev.button.x, ev.button.y);
+                    if (hit >= 0) {
+                        if (app.selectedArtist >= 0) app.artistNodes[app.selectedArtist].isSelected = false;
+                        if (hit == app.selectedArtist) {
+                            app.selectedArtist = -1; app.selectedAlbum = -1;
+                            app.currentLevel = G_ALPHA_LEVEL; app.camera.autoRotate = true;
+                            float maxR = 0;
+                            for (auto& n : app.artistNodes) maxR = std::max(maxR, glm::length(n.pos));
+                            app.camera.flyTo(glm::vec3(0), maxR * 1.5f);
+                        } else {
+                            app.selectedArtist = hit; app.selectedAlbum = -1;
+                            app.artistNodes[hit].isSelected = true;
+                            app.currentLevel = G_ARTIST_LEVEL; app.camera.autoRotate = false;
+                            app.camera.flyTo(app.artistNodes[hit].pos, app.artistNodes[hit].idealCameraDist);
+                        }
                     }
                 }
             }
             break;
-
-        case SDL_MOUSEBUTTONUP:
-            app.mouseDown = false;
-            break;
-
+        case SDL_MOUSEBUTTONUP: app.mouseDown = false; break;
         case SDL_MOUSEMOTION:
-            if (app.mouseDown && app.mouseButton == SDL_BUTTON_RIGHT) {
-                app.camera.onMouseDrag((float)event.motion.xrel, (float)event.motion.yrel);
-            }
+            if (app.mouseDown && !app.imguiWantsMouse && app.mouseButton == SDL_BUTTON_RIGHT)
+                app.camera.onMouseDrag((float)ev.motion.xrel, (float)ev.motion.yrel);
             break;
-
         case SDL_MOUSEWHEEL:
-            app.camera.onMouseScroll((float)event.wheel.y);
+            if (!app.imguiWantsMouse) app.camera.onMouseScroll((float)ev.wheel.y);
             break;
-
         case SDL_KEYDOWN:
-            if (event.key.keysym.sym == SDLK_ESCAPE) {
-                if (app.selectedArtist >= 0) {
-                    app.artistNodes[app.selectedArtist].isSelected = false;
-                    app.selectedArtist = -1;
-                    app.selectedAlbum = -1;
-                    app.currentLevel = G_ALPHA_LEVEL;
-                    app.camera.autoRotate = true;
-                    float maxR = 0;
-                    for (auto& n : app.artistNodes)
-                        maxR = std::max(maxR, glm::length(n.pos));
-                    app.camera.flyTo(glm::vec3(0), maxR * 1.5f);
-                } else {
-                    app.running = false;
+            if (!ImGui::GetIO().WantCaptureKeyboard) {
+                if (ev.key.keysym.sym == SDLK_ESCAPE) {
+                    if (app.selectedAlbum >= 0) { app.selectedAlbum = -1; app.currentLevel = G_ARTIST_LEVEL; }
+                    else if (app.selectedArtist >= 0) {
+                        app.artistNodes[app.selectedArtist].isSelected = false;
+                        app.selectedArtist = -1; app.currentLevel = G_ALPHA_LEVEL;
+                        app.camera.autoRotate = true;
+                        float maxR = 0;
+                        for (auto& n : app.artistNodes) maxR = std::max(maxR, glm::length(n.pos));
+                        app.camera.flyTo(glm::vec3(0), maxR * 1.5f);
+                    } else { app.running = false; }
                 }
+                if (ev.key.keysym.sym == SDLK_SPACE) app.audio.togglePause();
             }
             break;
-
         case SDL_DROPFILE: {
-            // Drag and drop a folder to scan
-            char* path = event.drop.file;
+            char* path = ev.drop.file;
             if (fs::is_directory(path)) {
                 app.musicPath = path;
                 app.scanning = true;
                 std::thread([&app]() {
                     app.library = scanMusicLibrary(app.musicPath,
-                        [&](int done, int total) {
-                            app.scanProgress = done;
-                            app.scanTotal = total;
-                        });
-                    app.libraryLoaded = true;
-                    app.scanning = false;
+                        [&](int d, int t) { app.scanProgress = d; app.scanTotal = t; });
+                    app.libraryLoaded = true; app.scanning = false;
                 }).detach();
             }
             SDL_free(path);
@@ -916,48 +1007,48 @@ void handleEvents(App& app) {
 // ============================================================
 // MAIN
 // ============================================================
+#ifdef _WIN32
+int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
+    int argc = __argc;
+    char** argv = __argv;
+#else
 int main(int argc, char* argv[]) {
+#endif
     App app;
-
     if (!initSDL(app)) return 1;
     if (!initResources(app)) return 1;
 
-    // If a path was passed as argument, scan it
     if (argc > 1) {
         app.musicPath = argv[1];
         if (fs::is_directory(app.musicPath)) {
             app.scanning = true;
             std::thread([&app]() {
                 app.library = scanMusicLibrary(app.musicPath,
-                    [&](int done, int total) {
-                        app.scanProgress = done;
-                        app.scanTotal = total;
-                    });
-                app.libraryLoaded = true;
-                app.scanning = false;
+                    [&](int d, int t) { app.scanProgress = d; app.scanTotal = t; });
+                app.libraryLoaded = true; app.scanning = false;
             }).detach();
         }
     }
 
-    auto prevTime = std::chrono::high_resolution_clock::now();
-
+    auto prev = std::chrono::high_resolution_clock::now();
     while (app.running) {
         auto now = std::chrono::high_resolution_clock::now();
-        float dt = std::chrono::duration<float>(now - prevTime).count();
-        prevTime = now;
+        float dt = std::chrono::duration<float>(now - prev).count();
+        prev = now;
         app.elapsedTime += dt;
 
         handleEvents(app);
-
-        // Check if library finished loading
-        if (app.libraryLoaded.exchange(false)) {
-            buildScene(app);
-        }
-
+        if (app.libraryLoaded.exchange(false)) buildScene(app);
         app.camera.update(dt);
         render(app);
+        renderUI(app);
+        SDL_GL_SwapWindow(app.window);
     }
 
+    app.audio.cleanup();
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplSDL2_Shutdown();
+    ImGui::DestroyContext();
     SDL_GL_DeleteContext(app.glContext);
     SDL_DestroyWindow(app.window);
     SDL_Quit();
