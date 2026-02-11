@@ -587,12 +587,15 @@ bool initSDL(App& app) {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    // Bigger, bolder default font
-    io.Fonts->AddFontDefault();
-    ImFontConfig fontCfg;
-    fontCfg.SizePixels = 18.0f;
-    fontCfg.OversampleH = 2;
-    io.Fonts->AddFontDefault(&fontCfg);
+    // Load Montserrat Bold -- clean, modern font similar to Proxima Nova
+    std::string fontPath = resolvePath("resources/Montserrat-Bold.ttf");
+    ImFont* defaultFont = io.Fonts->AddFontDefault();
+    ImFont* boldFont = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 16.0f);
+    if (!boldFont) {
+        std::cerr << "[Planetary] Failed to load font, using default" << std::endl;
+        ImFontConfig cfg; cfg.SizePixels = 16.0f;
+        boldFont = io.Fonts->AddFontDefault(&cfg);
+    }
     ImGui::StyleColorsDark();
 
     // Style - dark space theme
@@ -849,22 +852,21 @@ void renderScene(App& app) {
         // This is the key fix -- 1300 overlapping additive glows = whiteout
         if (isZoomedToStar) continue;
 
-        // Galaxy view: tiny colored dots
+        // Galaxy view: render as tiny colored spheres (not billboard circles)
         float distToCam = glm::length(n.pos - app.camera.position);
-        float distFade = std::clamp(1.0f - (distToCam / 800.0f), 0.0f, 1.0f);
-        if (distFade < 0.01f) continue;
-        app.billboard.draw(n.pos, glm::vec4(n.glowColor, 0.04f * distFade), n.glowRadius * 1.2f);
+        if (distToCam > 800.0f) continue;
     }
 
     glDepthMask(GL_TRUE);
     glEnable(GL_DEPTH_TEST);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    // --- Star cores ---
+    // --- Star rendering (solid spheres, not billboards) ---
     app.planetShader.use();
     app.planetShader.setMat4("uView", glm::value_ptr(view));
     app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
     app.planetShader.setVec3("uLightPos", 0, 50, 0);
+    glBindTexture(GL_TEXTURE_2D, app.texStarCore);
 
     for (auto& n : app.artistNodes) {
         if (n.isSelected) {
@@ -872,42 +874,35 @@ void renderScene(App& app) {
             float starSize = n.radius * 0.35f;
 
             // Star sphere with starCore texture - the MAIN bright element
-            // Star = glowing blob with animated flame edge
+            // Star: bright SOLID SPHERE + clean subtle glow
+            // No more ugly billboard circles -- the sphere IS the star
+            float coreSize = starSize * 0.5f;
+            glBindTexture(GL_TEXTURE_2D, app.texStarCore);
+            glm::mat4 m = glm::translate(glm::mat4(1.0f), n.pos);
+            m = glm::rotate(m, app.elapsedTime * 0.2f, glm::vec3(0.1f, 1, 0));
+            m = glm::scale(m, glm::vec3(coreSize));
+            app.planetShader.setMat4("uModel", glm::value_ptr(m));
+            glm::vec3 starColor = glm::mix(n.color, glm::vec3(1.0f, 0.95f, 0.9f), 0.6f);
+            app.planetShader.setVec3("uColor", starColor.r, starColor.g, starColor.b);
+            app.planetShader.setVec3("uEmissive", starColor.r * 0.6f, starColor.g * 0.55f, starColor.b * 0.5f);
+            app.planetShader.setFloat("uEmissiveStrength", 0.8f);
+            app.planetShader.setVec3("uLightPos", n.pos.x, n.pos.y + 5.0f, n.pos.z);
+            app.sphereHi.draw();
+
+            // One clean, subtle glow around the star
             glDepthMask(GL_FALSE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);
             app.billboardShader.use();
             app.billboardShader.setMat4("uView", glm::value_ptr(view));
             app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
-
-            glm::vec3 starColor = glm::mix(n.color, glm::vec3(0.8f, 0.9f, 1.0f), 0.5f);
-
-            // Bright hot core
             glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-            app.billboard.draw(n.pos, glm::vec4(1.0f, 1.0f, 1.0f, 0.85f), starSize * 1.2f);
-
-            // Flame edge: multiple slightly offset glow sprites that animate
-            // Creates a flickering, irregular edge like solar prominences
-            glBindTexture(GL_TEXTURE_2D, app.texParticle);
-            for (int fi = 0; fi < 12; fi++) {
-                float a = (float)fi / 12.0f * 2.0f * (float)M_PI;
-                float pulse = sinf(app.elapsedTime * (1.5f + fi * 0.3f) + a * 2.0f);
-                float dist = starSize * (0.6f + pulse * 0.15f);
-                glm::vec3 fpos = n.pos + glm::vec3(cosf(a) * dist, sinf(a * 0.7f) * dist * 0.3f, sinf(a) * dist);
-                float fsize = starSize * (0.4f + pulse * 0.1f);
-                float falpha = 0.06f + pulse * 0.02f;
-                glm::vec3 fcol = glm::mix(glm::vec3(1.0f, 0.95f, 0.8f), starColor, 0.3f + fi * 0.05f);
-                app.billboard.draw(fpos, glm::vec4(fcol, falpha), fsize);
-            }
-
-            // Blue-white mid glow
-            glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-            app.billboard.draw(n.pos, glm::vec4(starColor, 0.15f), starSize * 2.5f);
-
-            // Very faint halo
-            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.15f, 0.015f), starSize * 5.0f);
-
+            app.billboard.draw(n.pos, glm::vec4(starColor * 0.6f, 0.08f), coreSize * 3.0f);
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+            app.planetShader.use();
+            app.planetShader.setMat4("uView", glm::value_ptr(view));
+            app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
             app.planetShader.use();
             app.planetShader.setMat4("uView", glm::value_ptr(view));
             app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
@@ -1037,14 +1032,18 @@ void renderScene(App& app) {
 
             // Track moons -- only show when this album is selected
             if (ai == app.selectedAlbum) {
+                // Draw tilted orbit rings for each moon
                 app.ringShader.use();
                 app.ringShader.setMat4("uView", glm::value_ptr(view));
                 app.ringShader.setMat4("uProjection", glm::value_ptr(proj));
                 for (auto& t : o.tracks) {
                     glm::mat4 trm = glm::translate(glm::mat4(1.0f), apos);
+                    // Apply the same tilt as the moon's orbit
+                    trm = glm::rotate(trm, t.tiltX, glm::vec3(1, 0, 0));
+                    trm = glm::rotate(trm, t.tiltZ, glm::vec3(0, 0, 1));
                     trm = glm::scale(trm, glm::vec3(t.radius));
                     app.ringShader.setMat4("uModel", glm::value_ptr(trm));
-                    app.ringShader.setVec4("uColor", BRIGHT_BLUE.r, BRIGHT_BLUE.g, BRIGHT_BLUE.b, 0.06f);
+                    app.ringShader.setVec4("uColor", BRIGHT_BLUE.r * 0.5f, BRIGHT_BLUE.g * 0.5f, BRIGHT_BLUE.b * 0.5f, 0.04f);
                     app.unitRing.draw();
                 }
                 app.planetShader.use();
