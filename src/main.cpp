@@ -828,75 +828,47 @@ void renderScene(App& app) {
             float starSize = n.radius * 0.35f;
 
             // Star sphere with starCore texture - the MAIN bright element
-            // Star sphere -- texture VISIBLE (flames, surface detail)
+            // === EXACT ORIGINAL PLANETARY STAR RENDERING ===
+            // Original: small textured sphere (0.16x radius) + layered additive glow billboards
+            // NO flame particles -- the "flames" look comes from layered additive blending
+
+            // 1. Star core sphere -- starCore.png, 0.16x radius (original exact value)
             glBindTexture(GL_TEXTURE_2D, app.texStarCore);
             glm::mat4 m = glm::translate(glm::mat4(1.0f), n.pos);
-            m = glm::rotate(m, app.elapsedTime * 0.12f, glm::vec3(0.1f, 1, 0.05f));
-            m = glm::scale(m, glm::vec3(starSize));
+            m = glm::rotate(m, app.elapsedTime * 0.75f, glm::vec3(0, 1, n.hue));
+            m = glm::scale(m, glm::vec3(starSize * 0.16f));
             app.planetShader.setMat4("uModel", glm::value_ptr(m));
-            // Let texture detail show -- moderate color, LOW emissive
-            glm::vec3 warmTint = glm::mix(n.color, glm::vec3(1.0f, 0.85f, 0.6f), 0.5f);
-            app.planetShader.setVec3("uColor", warmTint.r, warmTint.g, warmTint.b);
-            app.planetShader.setVec3("uEmissive", warmTint.r * 0.3f, warmTint.g * 0.25f, warmTint.b * 0.2f);
-            app.planetShader.setFloat("uEmissiveStrength", 0.5f);
-            app.planetShader.setVec3("uLightPos", n.pos.x, n.pos.y + 5.0f, n.pos.z + 3.0f);
+            // Original: (mColor + white) * 0.5
+            glm::vec3 coreColor = (n.color + glm::vec3(1.0f)) * 0.5f;
+            app.planetShader.setVec3("uColor", coreColor.r, coreColor.g, coreColor.b);
+            app.planetShader.setVec3("uEmissive", coreColor.r, coreColor.g, coreColor.b);
+            app.planetShader.setFloat("uEmissiveStrength", 0.3f);
+            app.planetShader.setVec3("uLightPos", n.pos.x, n.pos.y + 5.0f, n.pos.z);
             app.sphereHi.draw();
 
-            // Minimal corona -- barely visible beyond the sphere
+            // 2. Layered additive glow billboards (original method)
             glDepthMask(GL_FALSE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);
             app.billboardShader.use();
             app.billboardShader.setMat4("uView", glm::value_ptr(view));
             app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
+
+            // Layer 1: atmosphereSun -- tight atmosphere (original: 2.42 * 0.16 = 0.387x)
+            glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
+            app.billboard.draw(n.pos,
+                glm::vec4((n.color + glm::vec3(1.0f)) * 0.5f, 0.35f),
+                starSize * 0.5f);
+
+            // Layer 2: starGlow -- main glow (original: 15x radius)
             glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-            // Tiny corona
-            app.billboard.draw(n.pos, glm::vec4(warmTint * 0.5f, 0.06f), starSize * 1.6f);
+            app.billboard.draw(n.pos,
+                glm::vec4(n.glowColor, 0.3f),
+                starSize * 15.0f);
 
-            // FLAME PARTICLES -- using soft particle texture, organic movement
-            glBindTexture(GL_TEXTURE_2D, app.texParticle);
-            int numFlames = 40;
-            for (int fi = 0; fi < numFlames; fi++) {
-                float seed = (float)fi * 137.508f + n.hue * 100.0f;
-                float speed = 0.4f + (float)(fi % 7) * 0.12f;
-                float t = app.elapsedTime * speed + seed;
-
-                // Flames erupt from surface and arc outward
-                float orbitAngle = t * 0.6f + sinf(t * 0.3f + seed) * 0.5f;
-                float elevation = sinf(seed * 2.17f) * 0.8f + sinf(t * 0.7f) * 0.2f;
-
-                // Life cycle: erupt outward then fade
-                float lifecycle = fmodf(t * 0.5f, 3.14159f) / 3.14159f; // 0 to 1
-                float eruptDist = sinf(lifecycle * 3.14159f); // peaks at 0.5
-                float flameR = starSize * (1.02f + eruptDist * 0.6f);
-
-                // Solar flares -- some go much further
-                if (fi % 8 == 0) {
-                    flameR = starSize * (1.05f + eruptDist * 1.2f);
-                }
-
-                glm::vec3 flamePos = n.pos + glm::vec3(
-                    cosf(orbitAngle) * cosf(elevation) * flameR,
-                    sinf(elevation) * flameR * 0.7f,
-                    sinf(orbitAngle) * cosf(elevation) * flameR
-                );
-
-                // Vary size -- smaller near surface, bigger as they erupt
-                float flameSize = starSize * (0.06f + eruptDist * 0.2f);
-                if (fi % 8 == 0) flameSize *= 1.5f; // Flares are bigger
-
-                // Color: hot white near surface -> orange -> red as they fly out
-                float heatMix = 1.0f - eruptDist;
-                glm::vec3 flameColor = glm::mix(
-                    glm::vec3(1.0f, 0.4f, 0.1f), // outer: orange-red
-                    glm::vec3(1.0f, 0.95f, 0.8f), // inner: hot white
-                    heatMix * 0.7f
-                );
-
-                float flameAlpha = 0.06f + eruptDist * 0.06f;
-                flameAlpha *= (1.0f - lifecycle * 0.5f); // fade at end of life
-
-                app.billboard.draw(flamePos, glm::vec4(flameColor, flameAlpha), flameSize);
-            }
+            // Layer 3: extraGlow -- inner bright white glow (original: 7.5x radius)
+            app.billboard.draw(n.pos,
+                glm::vec4(1.0f, 1.0f, 1.0f, 0.15f),
+                starSize * 7.5f);
 
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
