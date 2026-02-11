@@ -824,25 +824,25 @@ void renderScene(App& app) {
             float starSize = n.radius * 0.35f;
 
             // Star sphere with starCore texture - the MAIN bright element
-            // Star = glowing BLOB (not a perfect sphere)
-            // Use starGlow billboard as the main star body for organic look
+            // Star = glowing blob -- blue-white like the original
             glDepthMask(GL_FALSE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);
             app.billboardShader.use();
             app.billboardShader.setMat4("uView", glm::value_ptr(view));
             app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
 
-            glm::vec3 warmColor = glm::mix(n.color, glm::vec3(1.0f, 0.95f, 0.85f), 0.6f);
+            // Blue-white color shift like the original Planetary
+            glm::vec3 starColor = glm::mix(n.color, glm::vec3(0.8f, 0.9f, 1.0f), 0.5f);
 
-            // Hot white-yellow core blob (the star itself)
+            // Bright hot core
             glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-            app.billboard.draw(n.pos, glm::vec4(1.0f, 0.98f, 0.9f, 0.7f), starSize * 1.0f);
+            app.billboard.draw(n.pos, glm::vec4(1.0f, 1.0f, 1.0f, 0.8f), starSize * 1.2f);
 
-            // Colored mid glow (gives the star its color)
-            app.billboard.draw(n.pos, glm::vec4(warmColor, 0.25f), starSize * 2.0f);
+            // Blue-white mid glow
+            app.billboard.draw(n.pos, glm::vec4(starColor, 0.2f), starSize * 2.5f);
 
-            // Faint corona -- VERY subtle, just a hint
-            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.3f, 0.03f), starSize * 4.0f);
+            // Very faint colored halo
+            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.2f, 0.02f), starSize * 5.0f);
 
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -885,25 +885,21 @@ void renderScene(App& app) {
         app.planetShader.use();
         app.planetShader.setMat4("uView", glm::value_ptr(view));
         app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
-        glBindTexture(GL_TEXTURE_2D, app.texSurface);
 
         for (int ai = 0; ai < (int)star.albumOrbits.size(); ai++) {
             auto& o = star.albumOrbits[ai];
             float angle = o.angle + app.elapsedTime * o.speed;
             glm::vec3 apos = star.pos + glm::vec3(cosf(angle)*o.radius, 0, sinf(angle)*o.radius);
 
-            // Each planet gets a UNIQUE color/tint based on album hash
+            // Planet color from hash
             std::hash<std::string> hasher;
             size_t albumHash = hasher(o.name);
             float planetHue = (float)(albumHash % 1000) / 1000.0f;
             float planetSat = 0.3f + (float)((albumHash >> 10) % 100) / 200.0f;
-            // HSV to RGB for planet tint
             float ph = planetHue * 6.0f;
             int phi = (int)ph % 6;
             float pf = ph - (int)ph;
-            float pp = 1.0f - planetSat;
-            float pq = 1.0f - planetSat * pf;
-            float pt = 1.0f - planetSat * (1.0f - pf);
+            float pp = 1.0f - planetSat, pq = 1.0f - planetSat * pf, pt = 1.0f - planetSat * (1.0f - pf);
             glm::vec3 planetColor;
             switch (phi) {
                 case 0: planetColor = {1, pt, pp}; break;
@@ -913,41 +909,64 @@ void renderScene(App& app) {
                 case 4: planetColor = {pt, pp, 1}; break;
                 default: planetColor = {1, pp, pq}; break;
             }
-            // Darken to look realistic in space
-            planetColor *= 0.6f;
 
-            // Unique axial tilt per planet
+            // Unique tilt per planet
             float tiltX = sinf((float)albumHash * 0.1f) * 0.3f;
-            float tiltZ = cosf((float)albumHash * 0.2f) * 0.2f;
+            float tiltZ = cosf((float)albumHash * 0.2f) * 0.25f;
 
-            // Use different surface texture region per planet
-            int texType = albumHash % 5; // 5 planet types from original
+            // === USE ALBUM ART AS PLANET TEXTURE if available ===
+            std::string artKey = std::to_string(app.selectedArtist) + "_" + std::to_string(ai);
+            auto artIt = app.albumArtTextures.find(artKey);
+            bool hasArt = (artIt != app.albumArtTextures.end());
+
+            if (hasArt) {
+                // Album art texture -- use white color so art shows through
+                glBindTexture(GL_TEXTURE_2D, artIt->second);
+                app.planetShader.setVec3("uColor", 0.85f, 0.85f, 0.85f);
+            } else {
+                // Fallback: colored generic surface
+                glBindTexture(GL_TEXTURE_2D, app.texSurface);
+                app.planetShader.setVec3("uColor", planetColor.r * 0.7f, planetColor.g * 0.7f, planetColor.b * 0.7f);
+            }
 
             glm::mat4 pm = glm::translate(glm::mat4(1.0f), apos);
-            pm = glm::rotate(pm, app.elapsedTime * 0.15f + (float)ai * 1.5f,
+            pm = glm::rotate(pm, app.elapsedTime * 0.12f + (float)ai * 1.5f,
                 glm::vec3(tiltX, 1.0f, tiltZ));
             pm = glm::scale(pm, glm::vec3(o.planetSize));
             app.planetShader.setMat4("uModel", glm::value_ptr(pm));
-            app.planetShader.setVec3("uColor", planetColor.r, planetColor.g, planetColor.b);
             app.planetShader.setVec3("uLightPos", star.pos.x, star.pos.y, star.pos.z);
-            // Subtle colored emissive per planet
-            app.planetShader.setVec3("uEmissive",
-                planetColor.r * 0.08f, planetColor.g * 0.08f, planetColor.b * 0.08f);
-            app.planetShader.setFloat("uEmissiveStrength", ai == app.selectedAlbum ? 0.3f : 0.05f);
+            app.planetShader.setVec3("uEmissive", 0.01f, 0.01f, 0.02f);
+            app.planetShader.setFloat("uEmissiveStrength", ai == app.selectedAlbum ? 0.2f : 0.05f);
             app.sphereHi.draw();
 
-            // Atmosphere glow
+            // Cloud layer (semi-transparent, slightly larger, slower rotation)
+            if (o.numTracks > 3) {
+                int cloudIdx = albumHash % 5; // pick one of the 5 cloud textures
+                // Use planetClouds textures
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glBindTexture(GL_TEXTURE_2D, app.texSurface); // fallback for now
+                glm::mat4 cm = glm::translate(glm::mat4(1.0f), apos);
+                cm = glm::rotate(cm, app.elapsedTime * 0.08f + (float)ai * 2.0f,
+                    glm::vec3(tiltX * 0.5f, 1.0f, tiltZ * 0.7f));
+                cm = glm::scale(cm, glm::vec3(o.planetSize * 1.02f));
+                app.planetShader.setMat4("uModel", glm::value_ptr(cm));
+                app.planetShader.setVec3("uColor", 0.5f, 0.5f, 0.55f);
+                app.planetShader.setVec3("uEmissive", 0.0f, 0.0f, 0.0f);
+                app.planetShader.setFloat("uEmissiveStrength", 0.0f);
+                app.sphereHi.draw();
+            }
+
+            // Cyan-blue atmosphere ring
             glDepthMask(GL_FALSE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);
             app.billboardShader.use();
             app.billboardShader.setMat4("uView", glm::value_ptr(view));
             app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
             glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
-            // Blue atmosphere ring -- like the original Planetary
-            glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
-            float atmoAlpha = (ai == app.selectedAlbum) ? 0.25f : 0.12f;
+            float atmoAlpha = (ai == app.selectedAlbum) ? 0.2f : 0.1f;
             app.billboard.draw(apos,
-                glm::vec4(0.3f, 0.7f, 1.0f, atmoAlpha),  // cyan-blue atmosphere
+                glm::vec4(0.3f, 0.7f, 1.0f, atmoAlpha),
                 o.planetSize * 2.5f);
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
