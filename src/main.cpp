@@ -742,8 +742,9 @@ void renderScene(App& app) {
         glm::mat4 skyM = glm::translate(glm::mat4(1.0f), app.camera.position);
         skyM = glm::scale(skyM, glm::vec3(900.0f));
         app.planetShader.setMat4("uModel", glm::value_ptr(skyM));
-        app.planetShader.setVec3("uColor", 0.15f, 0.2f, 0.3f);
-        app.planetShader.setVec3("uEmissive", 0.04f, 0.06f, 0.12f);
+        // Teal-blue nebula like the original Planetary
+        app.planetShader.setVec3("uColor", 0.12f, 0.18f, 0.28f);
+        app.planetShader.setVec3("uEmissive", 0.035f, 0.055f, 0.1f);
         app.planetShader.setFloat("uEmissiveStrength", 1.0f);
         app.planetShader.setVec3("uLightPos", 0, 0, 0);
         glCullFace(GL_FRONT); glEnable(GL_CULL_FACE);
@@ -802,11 +803,10 @@ void renderScene(App& app) {
 
     for (auto& n : app.artistNodes) {
         if (n.isSelected) {
-            // SELECTED STAR: massive bright sphere like the original
-            // The original Planetary has the star fill ~1/4 of the screen
-            float starSize = n.radius * 0.5f;  // Much bigger core
+            // SELECTED STAR: bright sphere with tight contained glow
+            float starSize = n.radius * 0.35f;
 
-            // Star sphere with starCore texture
+            // Star sphere with starCore texture - the MAIN bright element
             glBindTexture(GL_TEXTURE_2D, app.texStarCore);
             glm::mat4 m = glm::translate(glm::mat4(1.0f), n.pos);
             m = glm::rotate(m, app.elapsedTime * 0.3f, glm::vec3(0,1,0));
@@ -814,31 +814,28 @@ void renderScene(App& app) {
             app.planetShader.setMat4("uModel", glm::value_ptr(m));
             glm::vec3 hotColor = glm::mix(n.color, glm::vec3(1.0f), 0.7f);
             app.planetShader.setVec3("uColor", hotColor.r, hotColor.g, hotColor.b);
-            app.planetShader.setVec3("uEmissive", 1.0f, 0.95f, 0.85f);
-            app.planetShader.setFloat("uEmissiveStrength", 1.5f);
+            app.planetShader.setVec3("uEmissive", 1.0f, 0.97f, 0.9f);
+            app.planetShader.setFloat("uEmissiveStrength", 1.2f);
             app.sphereHi.draw();
 
-            // Massive glow layers around the star (additive)
+            // Tight glow layers -- small and contained
             glDepthMask(GL_FALSE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);
             app.billboardShader.use();
             app.billboardShader.setMat4("uView", glm::value_ptr(view));
             app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
 
-            // Inner hot white glow
+            // Tight inner glow (just slightly bigger than the sphere)
             glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-            app.billboard.draw(n.pos, glm::vec4(1.0f, 0.98f, 0.9f, 0.5f), starSize * 6.0f);
+            app.billboard.draw(n.pos, glm::vec4(1.0f, 0.98f, 0.9f, 0.35f), starSize * 4.0f);
 
-            // Mid colored glow
-            app.billboard.draw(n.pos, glm::vec4(n.glowColor, 0.2f), starSize * 14.0f);
+            // Colored halo -- NOT huge, just 2-3x the star size
+            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.6f, 0.1f), starSize * 7.0f);
 
-            // Outer soft glow -- contained, not screen-filling
-            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.3f, 0.06f), starSize * 22.0f);
-
-            // Lens flare
+            // Lens flare -- subtle
             glBindTexture(GL_TEXTURE_2D, app.texLensFlare);
-            float flarePulse = 1.0f + sinf(app.elapsedTime * 0.8f) * 0.05f;
-            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.6f + glm::vec3(0.3f), 0.12f), starSize * 18.0f * flarePulse);
+            float flarePulse = 1.0f + sinf(app.elapsedTime * 0.8f) * 0.03f;
+            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.4f + glm::vec3(0.2f), 0.06f), starSize * 10.0f * flarePulse);
 
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -978,8 +975,9 @@ void renderLabels(App& app) {
         if (sp.x < -100 || sp.x > app.screenW + 100 || sp.y < -100 || sp.y > app.screenH + 100) continue;
 
         float alpha = std::clamp(1.0f - (distToCam / labelDist), 0.1f, 1.0f);
-        ImU32 col = ImGui::ColorConvertFloat4ToU32(ImVec4(n.color.r, n.color.g, n.color.b, alpha * 0.9f));
-        ImU32 shadow = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, alpha * 0.6f));
+        // WHITE text like the original Planetary
+        ImU32 col = ImGui::ColorConvertFloat4ToU32(ImVec4(1.0f, 1.0f, 1.0f, alpha * 0.9f));
+        ImU32 shadow = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, alpha * 0.7f));
 
         const char* name = n.name.c_str();
         ImVec2 textSize = ImGui::CalcTextSize(name);
@@ -1002,9 +1000,9 @@ void renderLabels(App& app) {
             glm::vec2 sp = worldToScreen(vp, apos + glm::vec3(0, o.planetSize * 1.5f, 0), app.screenW, app.screenH);
             if (sp.x < -100 || sp.x > app.screenW + 100) continue;
 
-            float alpha = (ai == app.selectedAlbum) ? 1.0f : 0.6f;
-            ImU32 col = ImGui::ColorConvertFloat4ToU32(ImVec4(0.7f, 0.85f, 1.0f, alpha));
-            ImU32 shadow = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, alpha * 0.5f));
+            float alpha = (ai == app.selectedAlbum) ? 1.0f : 0.7f;
+            ImU32 col = ImGui::ColorConvertFloat4ToU32(ImVec4(1.0f, 1.0f, 1.0f, alpha));
+            ImU32 shadow = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, alpha * 0.6f));
 
             ImVec2 ts = ImGui::CalcTextSize(o.name.c_str());
             ImVec2 pos(sp.x - ts.x * 0.5f, sp.y - ts.y);
@@ -1019,8 +1017,8 @@ void renderLabels(App& app) {
                     glm::vec2 msp = worldToScreen(vp, mp + glm::vec3(0, t.size * 2.0f, 0), app.screenW, app.screenH);
                     if (msp.x < 0 || msp.x > app.screenW) continue;
 
-                    ImU32 tc = ImGui::ColorConvertFloat4ToU32(ImVec4(0.6f, 0.7f, 0.8f, 0.7f));
-                    ImU32 ts2 = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, 0.4f));
+                    ImU32 tc = ImGui::ColorConvertFloat4ToU32(ImVec4(0.9f, 0.9f, 0.95f, 0.7f));
+                    ImU32 ts2 = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, 0.5f));
                     ImVec2 tts = ImGui::CalcTextSize(t.name.c_str());
                     ImVec2 tp(msp.x - tts.x * 0.5f, msp.y - tts.y);
                     dl->AddText(ImVec2(tp.x + 1, tp.y + 1), ts2, t.name.c_str());
@@ -1156,22 +1154,38 @@ void renderUI(App& app) {
             app.audio.currentArtist.c_str(), app.audio.currentAlbum.c_str());
         ImGui::EndGroup();
 
-        ImGui::SameLine(300);
+        ImGui::SameLine(280);
 
-        // Progress bar
-        float prog = app.audio.progress();
+        // Time display
         float ct = app.audio.currentTime();
         int cm = (int)ct / 60, cs = (int)ct % 60;
-        int dm = (int)app.audio.duration / 60, ds = (int)app.audio.duration % 60;
-        char timeStr[64];
-        snprintf(timeStr, sizeof(timeStr), "%d:%02d / %d:%02d", cm, cs, dm, ds);
+        ImGui::TextColored(ImVec4(0.5f, 0.7f, 0.9f, 0.9f), "%d:%02d", cm, cs);
+        ImGui::SameLine();
 
-        ImGui::SetNextItemWidth((float)app.screenW - 500);
-        ImGui::ProgressBar(prog, ImVec2(-1, 14), timeStr);
+        // Seekable progress slider -- drag to change position
+        float prog = app.audio.progress();
+        ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.4f, 0.8f, 1.0f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.1f, 0.15f, 0.2f, 0.8f));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.15f, 0.2f, 0.3f, 0.9f));
+        ImGui::SetNextItemWidth((float)app.screenW - 520);
+        if (ImGui::SliderFloat("##seek", &prog, 0.0f, 1.0f, "")) {
+            // Seek to new position
+            if (app.audio.soundInit && app.audio.duration > 0) {
+                float seekTime = prog * app.audio.duration;
+                ma_uint32 sampleRate = ma_engine_get_sample_rate(&app.audio.engine);
+                ma_sound_seek_to_pcm_frame(&app.audio.sound,
+                    (ma_uint64)(seekTime * sampleRate));
+            }
+        }
+        ImGui::PopStyleColor(3);
+
+        ImGui::SameLine();
+        int dm = (int)app.audio.duration / 60, ds = (int)app.audio.duration % 60;
+        ImGui::TextColored(ImVec4(0.4f, 0.5f, 0.6f, 0.7f), "%d:%02d", dm, ds);
 
         // Volume
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(80);
+        ImGui::SetNextItemWidth(70);
         if (ImGui::SliderFloat("##vol", &app.audio.volume, 0.0f, 1.0f, "")) {
             app.audio.setVolume(app.audio.volume);
         }
