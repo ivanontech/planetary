@@ -160,8 +160,12 @@ void computeArtistPosition(ArtistNode& node, int total) {
     std::hash<std::string> hasher;
     size_t h = hasher(node.name);
     float hashPer = (float)(h % 9000L) / 90.0f + 10.0f;
+    // Spread stars much further apart -- more empty space between them
+    float spreadFactor = 3.5f;
+    hashPer *= spreadFactor;
     float angle = (float)node.index * 0.618f;
-    node.pos = glm::vec3(cosf(angle) * hashPer, hashPer * 0.2f - 10.0f, sinf(angle) * hashPer);
+    float height = (hashPer * 0.15f - 10.0f * spreadFactor) * 0.6f; // Flatter disc
+    node.pos = glm::vec3(cosf(angle) * hashPer, height, sinf(angle) * hashPer);
 }
 
 // ============================================================
@@ -463,7 +467,7 @@ struct App {
     // Rendering
     Shader starPointShader, billboardShader, planetShader, ringShader;
     Shader bloomBrightShader, bloomBlurShader, bloomCompositeShader;
-    GLuint texStarGlow=0, texAtmosphere=0, texStar=0, texSurface=0;
+    GLuint texStarGlow=0, texAtmosphere=0, texStar=0, texSurface=0, texSkydome=0;
     BackgroundStars bgStars;
     BillboardQuad billboard;
     SphereMesh sphereHi, sphereMd, sphereLo;
@@ -627,7 +631,8 @@ bool initResources(App& app) {
     app.texStarGlow = loadTexture("resources/starGlow.png");
     app.texAtmosphere = loadTexture("resources/atmosphere.png");
     app.texStar = loadTexture("resources/star.png");
-    app.texSurface = loadTexture("resources/surfacesLowRes.png");
+    app.texSurface = loadTexture("resources/surfacesHighRes.png");
+    app.texSkydome = loadTexture("resources/skydomeFull.png");
 
     app.bgStars.create(8000);
     app.billboard.create();
@@ -687,9 +692,29 @@ void renderScene(App& app) {
     glm::mat4 view = app.camera.viewMatrix();
     glm::mat4 proj = app.camera.projMatrix();
 
-    // --- Background stars ---
+    // --- Skydome: galaxy/nebula background (original: skydomeFull.png) ---
     glDepthMask(GL_FALSE);
     glDisable(GL_DEPTH_TEST);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    app.planetShader.use();
+    app.planetShader.setMat4("uView", glm::value_ptr(view));
+    app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
+    glBindTexture(GL_TEXTURE_2D, app.texSkydome);
+    {
+        // Huge sphere centered on camera, always surrounds the viewer
+        glm::mat4 skyM = glm::translate(glm::mat4(1.0f), app.camera.position);
+        skyM = glm::scale(skyM, glm::vec3(900.0f));
+        app.planetShader.setMat4("uModel", glm::value_ptr(skyM));
+        app.planetShader.setVec3("uColor", 0.3f, 0.35f, 0.5f);
+        app.planetShader.setVec3("uEmissive", 0.08f, 0.1f, 0.18f);
+        app.planetShader.setFloat("uEmissiveStrength", 1.0f);
+        app.planetShader.setVec3("uLightPos", 0, 0, 0);
+        glCullFace(GL_FRONT); glEnable(GL_CULL_FACE);
+        app.sphereLo.draw();
+        glDisable(GL_CULL_FACE);
+    }
+
+    // --- Background stars ---
     glBlendFunc(GL_SRC_ALPHA, GL_ONE);
     app.starPointShader.use();
     app.starPointShader.setMat4("uView", glm::value_ptr(view));
@@ -700,20 +725,32 @@ void renderScene(App& app) {
     app.bgStars.draw();
 
     // --- Star glows (additive billboards) ---
+    // Original Planetary: only selected star has massive glow
+    // Other stars have subtle small halos
     app.billboardShader.use();
     app.billboardShader.setMat4("uView", glm::value_ptr(view));
     app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
     glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-    float glowAlphaScale = std::min(1.0f, 30.0f / std::max((float)app.artistNodes.size(), 1.0f));
 
     for (auto& n : app.artistNodes) {
         float distToCam = glm::length(n.pos - app.camera.position);
-        float distFade = std::clamp(1.0f - (distToCam / 300.0f), 0.0f, 1.0f);
-        if (distFade < 0.01f && !n.isSelected) continue;
-        float pulse = 1.0f + sinf(app.elapsedTime * 1.5f + (float)n.index) * 0.08f;
-        float sz = n.glowRadius * 10.0f * pulse * (n.isSelected ? 1.5f : 1.0f);
-        float alpha = (n.isSelected ? 0.6f : 0.12f * glowAlphaScale) * distFade;
-        app.billboard.draw(n.pos, glm::vec4(n.glowColor, alpha), sz);
+
+        if (n.isSelected) {
+            // Selected star: massive bright glow like the original
+            float pulse = 1.0f + sinf(app.elapsedTime * 1.5f) * 0.1f;
+            float sz = n.glowRadius * 25.0f * pulse;
+            app.billboard.draw(n.pos, glm::vec4(n.glowColor, 0.4f), sz);
+            // Inner hot glow
+            app.billboard.draw(n.pos, glm::vec4(1.0f, 1.0f, 1.0f, 0.25f), sz * 0.3f);
+        } else {
+            // Non-selected: small subtle glow, fade with distance
+            float maxDist = 600.0f;
+            float distFade = std::clamp(1.0f - (distToCam / maxDist), 0.0f, 1.0f);
+            if (distFade < 0.01f) continue;
+            float sz = n.glowRadius * 3.0f;
+            float alpha = 0.15f * distFade;
+            app.billboard.draw(n.pos, glm::vec4(n.glowColor, alpha), sz);
+        }
     }
 
     glDepthMask(GL_TRUE);
@@ -784,7 +821,8 @@ void renderScene(App& app) {
             app.billboardShader.setMat4("uView", glm::value_ptr(view));
             app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
             glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
-            app.billboard.draw(apos, glm::vec4(star.glowColor * 0.5f, 0.25f), o.planetSize * 4.84f);
+            float atmoAlpha = (ai == app.selectedAlbum) ? 0.2f : 0.1f;
+            app.billboard.draw(apos, glm::vec4(star.glowColor * 0.4f, atmoAlpha), o.planetSize * 3.5f);
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
@@ -839,7 +877,7 @@ void render(App& app) {
     glClear(GL_COLOR_BUFFER_BIT);
     glDisable(GL_DEPTH_TEST);
     app.bloomBrightShader.use();
-    app.bloomBrightShader.setFloat("uThreshold", 0.3f);
+    app.bloomBrightShader.setFloat("uThreshold", 0.7f);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, app.sceneColor);
     app.bloomBrightShader.setInt("uScene", 0);
@@ -868,7 +906,7 @@ void render(App& app) {
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, app.bloomColor[0]);
     app.bloomCompositeShader.setInt("uBloom", 1);
-    app.bloomCompositeShader.setFloat("uBloomStrength", 0.8f);
+    app.bloomCompositeShader.setFloat("uBloomStrength", 0.5f);
     drawFullscreenQuad(app);
 
     glEnable(GL_DEPTH_TEST);
