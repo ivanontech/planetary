@@ -152,7 +152,9 @@ void computeArtistColor(ArtistNode& node) {
 
     node.color = hsvToRgb(node.hue, std::max(node.sat, 0.5f), 1.0f);
     node.glowColor = hsvToRgb(node.hue, std::min(node.sat + 0.2f, 1.0f), 1.0f);
-    node.radiusInit = 1.25f + (0.66f - node.hue);
+    // Star size scales with library size: more albums/tracks = bigger star
+    float libraryScale = 1.0f + std::min((float)node.totalTracks / 50.0f, 2.0f);
+    node.radiusInit = (1.25f + (0.66f - node.hue)) * libraryScale;
     node.radius = node.radiusInit;
 }
 
@@ -994,43 +996,66 @@ void renderScene(App& app) {
     app.starPointShader.setInt("uTexture", 0);
     app.bgStars.draw();
 
-    // --- NEBULA CLOUDS --- colorful gas clouds scattered in deep space
-    // Creates the Hubble-like nebula atmosphere
+    // --- NEBULA GAS FIELDS --- rich Hubble-like colorful gas filling deep space
     app.billboardShader.use();
     app.billboardShader.setMat4("uView", glm::value_ptr(view));
     app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
     glBindTexture(GL_TEXTURE_2D, app.texParticle);
     {
-        // Seed-based nebula clouds at fixed positions
-        std::mt19937 nebRng(12345); // deterministic
-        std::uniform_real_distribution<float> nebDist(-400.0f, 400.0f);
-        std::uniform_real_distribution<float> nebSize(60.0f, 200.0f);
+        std::mt19937 nebRng(12345);
+        std::uniform_real_distribution<float> nebDist(-500.0f, 500.0f);
+        std::uniform_real_distribution<float> nebSize(40.0f, 250.0f);
         std::uniform_real_distribution<float> nebHue(0.0f, 1.0f);
+        std::uniform_real_distribution<float> nebLayer(-1.0f, 1.0f);
 
-        int numClouds = 80;
-        for (int ci = 0; ci < numClouds; ci++) {
-            glm::vec3 cpos(nebDist(nebRng), nebDist(nebRng) * 0.4f, nebDist(nebRng));
-            float csize = nebSize(nebRng);
+        // Layer 1: Large diffuse gas regions (background)
+        int numLarge = 60;
+        for (int ci = 0; ci < numLarge; ci++) {
+            glm::vec3 cp(nebDist(nebRng), nebDist(nebRng)*0.35f, nebDist(nebRng));
+            float cs = nebSize(nebRng) * 1.5f;
             float ch = nebHue(nebRng);
-
-            // Nebula colors: blues, purples, reds, oranges
-            glm::vec3 nebColor;
-            if (ch < 0.3f) nebColor = glm::vec3(0.2f, 0.3f, 0.8f);       // Blue
-            else if (ch < 0.5f) nebColor = glm::vec3(0.5f, 0.2f, 0.7f);   // Purple
-            else if (ch < 0.7f) nebColor = glm::vec3(0.8f, 0.2f, 0.15f);  // Red
-            else if (ch < 0.85f) nebColor = glm::vec3(0.7f, 0.4f, 0.15f); // Orange
-            else nebColor = glm::vec3(0.15f, 0.6f, 0.5f);                  // Teal
-
-            // Very subtle -- just enough to tint the darkness
-            float nebAlpha = 0.02f + sinf(app.elapsedTime * 0.1f + ci * 0.5f) * 0.002f;
-
-            // Audio reactivity -- nebulae glow slightly with music
-            if (app.audio.playing) {
-                nebAlpha += app.audioWave * 0.01f;
-            }
-
-            app.billboard.draw(cpos, glm::vec4(nebColor, nebAlpha), csize);
+            glm::vec3 nc;
+            if (ch<0.15f) nc = glm::vec3(0.15f, 0.2f, 0.7f);       // Deep blue
+            else if(ch<0.3f) nc = glm::vec3(0.4f, 0.1f, 0.6f);      // Purple
+            else if(ch<0.45f) nc = glm::vec3(0.7f, 0.1f, 0.1f);     // Deep red
+            else if(ch<0.55f) nc = glm::vec3(0.8f, 0.4f, 0.1f);     // Orange
+            else if(ch<0.65f) nc = glm::vec3(0.1f, 0.5f, 0.4f);     // Teal
+            else if(ch<0.75f) nc = glm::vec3(0.6f, 0.15f, 0.4f);    // Magenta
+            else if(ch<0.85f) nc = glm::vec3(0.2f, 0.5f, 0.8f);     // Cyan
+            else nc = glm::vec3(0.5f, 0.3f, 0.15f);                   // Warm brown
+            float na = 0.015f + sinf(app.elapsedTime * 0.05f + ci * 0.3f) * 0.003f;
+            if (app.audio.playing) na += app.audioWave * 0.008f;
+            app.billboard.draw(cp, glm::vec4(nc, na), cs);
         }
+        
+        // Layer 2: Smaller, brighter gas knots (mid-ground)
+        int numKnots = 50;
+        for (int ci = 0; ci < numKnots; ci++) {
+            glm::vec3 cp(nebDist(nebRng), nebDist(nebRng)*0.3f, nebDist(nebRng));
+            float cs = 30.0f + nebSize(nebRng) * 0.4f;
+            float ch = nebHue(nebRng);
+            glm::vec3 nc;
+            if (ch<0.25f) nc = glm::vec3(0.3f, 0.5f, 1.0f);        // Bright blue
+            else if(ch<0.5f) nc = glm::vec3(1.0f, 0.3f, 0.2f);     // Bright red
+            else if(ch<0.75f) nc = glm::vec3(0.8f, 0.5f, 1.0f);    // Lavender
+            else nc = glm::vec3(1.0f, 0.7f, 0.2f);                   // Gold
+            float na = 0.02f + sinf(app.elapsedTime * 0.08f + ci * 0.7f) * 0.005f;
+            if (app.audio.playing) na += app.audioBass * 0.01f;
+            app.billboard.draw(cp, glm::vec4(nc, na), cs);
+        }
+        
+        // Layer 3: Wispy tendrils connecting regions
+        glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
+        int numWisps = 30;
+        for (int ci = 0; ci < numWisps; ci++) {
+            glm::vec3 cp(nebDist(nebRng), nebDist(nebRng)*0.25f, nebDist(nebRng));
+            float cs = 80.0f + nebSize(nebRng) * 0.8f;
+            float ch = nebHue(nebRng);
+            glm::vec3 nc = (ch < 0.5f) ? glm::vec3(0.2f, 0.15f, 0.4f) : glm::vec3(0.4f, 0.12f, 0.08f);
+            float na = 0.008f;
+            app.billboard.draw(cp, glm::vec4(nc, na), cs);
+        }
+        glBindTexture(GL_TEXTURE_2D, app.texParticle);
     }
 
     // --- Star rendering ---
@@ -1177,10 +1202,39 @@ void renderScene(App& app) {
                     glDeleteBuffers(1, &fvbo); glDeleteVertexArrays(1, &fvao);
                 }
                 
-                // Restore billboard shader
+                // Restore billboard shader + add soft flame glows along the streaks
                 app.billboardShader.use();
                 app.billboardShader.setMat4("uView", glm::value_ptr(view));
                 app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
+                
+                // Soft flame GLOWS at the tips of streaks (not circles -- elongated via multiple draws)
+                glBindTexture(GL_TEXTURE_2D, app.texParticle);
+                for (int fi = 0; fi < 16; fi++) {
+                    float seed = (float)fi * 137.508f + n.hue * 50.0f;
+                    float beatSync = app.audioBass * 2.5f + app.audioWave * 2.0f;
+                    float phase = app.elapsedTime * (0.3f + (fi % 5) * 0.15f) + seed;
+                    float lifecycle = fmodf(phase * 0.2f, 1.0f);
+                    float erupt = sinf(lifecycle * (float)M_PI) * (0.15f + beatSync * 0.5f);
+                    if (erupt < 0.03f) continue;
+                    
+                    float theta = seed * 2.39996f + sinf(app.elapsedTime * 0.2f) * 0.3f;
+                    float phi2 = sinf(seed * 1.618f) * (float)M_PI;
+                    glm::vec3 dir(sinf(phi2)*cosf(theta), sinf(phi2)*sinf(theta)*0.7f, cosf(phi2));
+                    
+                    // Trail of small glows creating a flame tongue
+                    float reachDist = coreSize * (0.3f + erupt * 3.0f);
+                    for (int p = 0; p < 5; p++) {
+                        float t = (float)p / 4.0f;
+                        float d = coreSize * 1.0f + t * reachDist;
+                        float s = coreSize * (0.08f + (1.0f-t) * 0.06f) * (0.5f + erupt);
+                        float a = erupt * 0.06f * (1.0f - t * 0.7f);
+                        glm::vec3 fp = n.pos + dir * d;
+                        fp += glm::vec3(sinf(seed+t*3.0f), cosf(seed*2.0f+t*2.0f), sinf(seed*3.0f+t)) * coreSize * 0.05f;
+                        glm::vec3 fc = glm::mix(glm::vec3(1.0f, 0.95f, 0.7f), n.color * 0.8f + glm::vec3(0.4f, 0.1f, 0.0f), t);
+                        app.billboard.draw(fp, glm::vec4(fc, a), s);
+                    }
+                }
+                
                 glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
                 
                 // === NEBULA GAS + GRAVITY LOOPS + WAVELENGTHS ===
@@ -1216,7 +1270,7 @@ void renderScene(App& app) {
                 
                 // GRAVITY LOOPS -- figure-8 / loop patterns driven by audio
                 glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
-                for (int li = 0; li < 4; li++) {
+                for (int li = 0; li < 2; li++) {
                     float loopPhase = app.elapsedTime * 0.15f + (float)li * 1.571f;
                     float loopR = coreSize * (2.5f + app.audioBass * 2.0f + li * 0.5f);
                     int loopSegs = 40;
