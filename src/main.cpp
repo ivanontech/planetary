@@ -25,6 +25,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <map>
 
 #include "stb_image.h"
 #include "shader.h"
@@ -483,6 +484,9 @@ struct App {
     // Audio
     AudioPlayer audio;
 
+    // Album art textures (artistIdx_albumIdx -> GL texture)
+    std::map<std::string, GLuint> albumArtTextures;
+
     float elapsedTime = 0;
     bool mouseDown = false;
     int mouseButton = 0;
@@ -679,6 +683,35 @@ void buildScene(App& app) {
     app.statusMsg = std::to_string(total) + " artists, " +
                     std::to_string(app.library.totalAlbums) + " albums, " +
                     std::to_string(app.library.totalTracks) + " tracks";
+
+    // Create GL textures for album art
+    for (int ai = 0; ai < (int)app.library.artists.size(); ai++) {
+        for (int bi = 0; bi < (int)app.library.artists[ai].albums.size(); bi++) {
+            auto& album = app.library.artists[ai].albums[bi];
+            if (!album.coverArtData.empty()) {
+                int w, h, ch;
+                unsigned char* img = stbi_load_from_memory(
+                    album.coverArtData.data(), (int)album.coverArtData.size(), &w, &h, &ch, 4);
+                if (img) {
+                    GLuint tex;
+                    glGenTextures(1, &tex);
+                    glBindTexture(GL_TEXTURE_2D, tex);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+                    glGenerateMipmap(GL_TEXTURE_2D);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    stbi_image_free(img);
+
+                    std::string key = std::to_string(ai) + "_" + std::to_string(bi);
+                    app.albumArtTextures[key] = tex;
+                }
+                // Free the raw data since we have the GL texture now
+                album.coverArtData.clear();
+                album.coverArtData.shrink_to_fit();
+            }
+        }
+    }
+    std::cout << "[Planetary] Loaded " << app.albumArtTextures.size() << " album art textures" << std::endl;
 }
 
 // ============================================================
@@ -794,19 +827,18 @@ void renderScene(App& app) {
 
             // Inner hot white glow
             glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-            app.billboard.draw(n.pos, glm::vec4(1.0f, 0.98f, 0.9f, 0.6f), starSize * 12.0f);
+            app.billboard.draw(n.pos, glm::vec4(1.0f, 0.98f, 0.9f, 0.5f), starSize * 6.0f);
 
             // Mid colored glow
-            app.billboard.draw(n.pos, glm::vec4(n.glowColor, 0.3f), starSize * 30.0f);
+            app.billboard.draw(n.pos, glm::vec4(n.glowColor, 0.2f), starSize * 14.0f);
 
-            // Outer soft glow
-            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.5f, 0.12f), starSize * 50.0f);
+            // Outer soft glow -- contained, not screen-filling
+            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.3f, 0.06f), starSize * 22.0f);
 
             // Lens flare
             glBindTexture(GL_TEXTURE_2D, app.texLensFlare);
-            float flareSize = starSize * 40.0f;
             float flarePulse = 1.0f + sinf(app.elapsedTime * 0.8f) * 0.05f;
-            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.8f + glm::vec3(0.2f), 0.15f), flareSize * flarePulse);
+            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.6f + glm::vec3(0.3f), 0.12f), starSize * 18.0f * flarePulse);
 
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -917,54 +949,15 @@ void renderScene(App& app) {
 }
 
 void render(App& app) {
-    // Render scene to FBO for bloom
-    glBindFramebuffer(GL_FRAMEBUFFER, app.sceneFBO);
+    // Render directly to screen -- no bloom (bloom was causing whiteout)
+    // The original Planetary used additive-blended sprites for glows,
+    // not screen-space bloom. The additive glows on a dark background
+    // create the luminous look naturally.
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, app.screenW, app.screenH);
     glClearColor(0.0f, 0.0f, 0.005f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     renderScene(app);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-    // --- BLOOM: Extract bright parts ---
-    glBindFramebuffer(GL_FRAMEBUFFER, app.bloomFBO[0]);
-    glViewport(0, 0, app.bloomW, app.bloomH);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glDisable(GL_DEPTH_TEST);
-    app.bloomBrightShader.use();
-    app.bloomBrightShader.setFloat("uThreshold", 0.7f);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, app.sceneColor);
-    app.bloomBrightShader.setInt("uScene", 0);
-    drawFullscreenQuad(app);
-
-    // --- BLOOM: Gaussian blur (ping-pong, 5 passes) ---
-    app.bloomBlurShader.use();
-    for (int pass = 0; pass < 10; pass++) {
-        bool horiz = (pass % 2 == 0);
-        glBindFramebuffer(GL_FRAMEBUFFER, app.bloomFBO[horiz ? 1 : 0]);
-        glBindTexture(GL_TEXTURE_2D, app.bloomColor[horiz ? 0 : 1]);
-        app.bloomBlurShader.setInt("uImage", 0);
-        app.bloomBlurShader.setInt("uHorizontal", horiz ? 1 : 0);
-        app.bloomBlurShader.setFloat("uTexelSize", 1.0f / (horiz ? app.bloomW : app.bloomH));
-        drawFullscreenQuad(app);
-    }
-
-    // --- BLOOM: Composite ---
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glViewport(0, 0, app.screenW, app.screenH);
-    glClear(GL_COLOR_BUFFER_BIT);
-    app.bloomCompositeShader.use();
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, app.sceneColor);
-    app.bloomCompositeShader.setInt("uScene", 0);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, app.bloomColor[0]);
-    app.bloomCompositeShader.setInt("uBloom", 1);
-    app.bloomCompositeShader.setFloat("uBloomStrength", 0.5f);
-    drawFullscreenQuad(app);
-
-    glEnable(GL_DEPTH_TEST);
-    glActiveTexture(GL_TEXTURE0);
 }
 
 // ============================================================
@@ -1084,11 +1077,20 @@ void renderUI(App& app) {
         ImGui::TextColored(ImVec4(0.5f, 0.6f, 0.7f, 0.8f),
             "%d albums, %d tracks", (int)star.albumOrbits.size(), star.totalTracks);
 
-        // Album list
+        // Album list with cover art
         for (int i = 0; i < (int)star.albumOrbits.size(); i++) {
             auto& album = star.albumOrbits[i];
             bool selected = (i == app.selectedAlbum);
-            if (ImGui::Selectable(album.name.c_str(), selected)) {
+
+            // Album art thumbnail
+            std::string artKey = std::to_string(app.selectedArtist) + "_" + std::to_string(i);
+            auto artIt = app.albumArtTextures.find(artKey);
+            if (artIt != app.albumArtTextures.end()) {
+                ImGui::Image((ImTextureID)(intptr_t)artIt->second, ImVec2(32, 32));
+                ImGui::SameLine();
+            }
+
+            if (ImGui::Selectable(album.name.c_str(), selected, 0, ImVec2(0, 32))) {
                 app.selectedAlbum = (app.selectedAlbum == i) ? -1 : i;
                 app.currentLevel = (app.selectedAlbum >= 0) ? G_ALBUM_LEVEL : G_ARTIST_LEVEL;
             }
@@ -1245,6 +1247,43 @@ int hitTestStar(App& app, int mx, int my) {
     return bestIdx;
 }
 
+// Hit test planets and moons in the 3D view. Returns {albumIdx, trackIdx} or {-1,-1}
+struct HitResult { int album = -1; int track = -1; };
+
+HitResult hitTestPlanetMoon(App& app, int mx, int my) {
+    if (app.selectedArtist < 0) return {};
+    auto& star = app.artistNodes[app.selectedArtist];
+    glm::mat4 vp = app.camera.projMatrix() * app.camera.viewMatrix();
+    float bestDist = 999999;
+    HitResult result;
+
+    for (int ai = 0; ai < (int)star.albumOrbits.size(); ai++) {
+        auto& o = star.albumOrbits[ai];
+        float angle = o.angle + app.elapsedTime * o.speed;
+        glm::vec3 apos = star.pos + glm::vec3(cosf(angle)*o.radius, 0, sinf(angle)*o.radius);
+
+        // Test planet
+        glm::vec2 sp = worldToScreen(vp, apos, app.screenW, app.screenH);
+        float d = sqrtf((sp.x-mx)*(sp.x-mx) + (sp.y-my)*(sp.y-my));
+        float hitR = std::max(25.0f, o.planetSize * 80.0f);
+        if (d < hitR && d < bestDist) { bestDist = d; result = {ai, -1}; }
+
+        // Test track moons (only for selected album)
+        if (ai == app.selectedAlbum) {
+            for (int ti = 0; ti < (int)o.tracks.size(); ti++) {
+                auto& t = o.tracks[ti];
+                float ta = t.angle + app.elapsedTime * t.speed;
+                glm::vec3 mp = apos + glm::vec3(cosf(ta)*t.radius, 0, sinf(ta)*t.radius);
+                glm::vec2 msp = worldToScreen(vp, mp, app.screenW, app.screenH);
+                float md = sqrtf((msp.x-mx)*(msp.x-mx) + (msp.y-my)*(msp.y-my));
+                float mhitR = std::max(20.0f, t.size * 120.0f);
+                if (md < mhitR && md < bestDist) { bestDist = md; result = {ai, ti}; }
+            }
+        }
+    }
+    return result;
+}
+
 // ============================================================
 // EVENTS
 // ============================================================
@@ -1265,20 +1304,40 @@ void handleEvents(App& app) {
             if (!app.imguiWantsMouse) {
                 app.mouseDown = true; app.mouseButton = ev.button.button;
                 if (ev.button.button == SDL_BUTTON_LEFT) {
-                    int hit = hitTestStar(app, ev.button.x, ev.button.y);
-                    if (hit >= 0) {
-                        if (app.selectedArtist >= 0) app.artistNodes[app.selectedArtist].isSelected = false;
-                        if (hit == app.selectedArtist) {
-                            app.selectedArtist = -1; app.selectedAlbum = -1;
-                            app.currentLevel = G_ALPHA_LEVEL; app.camera.autoRotate = true;
-                            float maxR = 0;
-                            for (auto& n : app.artistNodes) maxR = std::max(maxR, glm::length(n.pos));
-                            app.camera.flyTo(glm::vec3(0), maxR * 1.5f);
+                    // First try to hit planets/moons if we have a selected artist
+                    HitResult pmHit = hitTestPlanetMoon(app, ev.button.x, ev.button.y);
+                    if (pmHit.track >= 0 && pmHit.album >= 0) {
+                        // Clicked a track moon -- play it!
+                        auto& star = app.artistNodes[app.selectedArtist];
+                        auto& album = star.albumOrbits[pmHit.album];
+                        auto& track = album.tracks[pmHit.track];
+                        app.audio.play(track.filePath, track.name, star.name, album.name, track.duration);
+                    } else if (pmHit.album >= 0) {
+                        // Clicked an album planet -- select/deselect it
+                        if (app.selectedAlbum == pmHit.album) {
+                            app.selectedAlbum = -1;
+                            app.currentLevel = G_ARTIST_LEVEL;
                         } else {
-                            app.selectedArtist = hit; app.selectedAlbum = -1;
-                            app.artistNodes[hit].isSelected = true;
-                            app.currentLevel = G_ARTIST_LEVEL; app.camera.autoRotate = false;
-                            app.camera.flyTo(app.artistNodes[hit].pos, app.artistNodes[hit].idealCameraDist);
+                            app.selectedAlbum = pmHit.album;
+                            app.currentLevel = G_ALBUM_LEVEL;
+                        }
+                    } else {
+                        // Try to hit a star
+                        int hit = hitTestStar(app, ev.button.x, ev.button.y);
+                        if (hit >= 0) {
+                            if (app.selectedArtist >= 0) app.artistNodes[app.selectedArtist].isSelected = false;
+                            if (hit == app.selectedArtist) {
+                                app.selectedArtist = -1; app.selectedAlbum = -1;
+                                app.currentLevel = G_ALPHA_LEVEL; app.camera.autoRotate = true;
+                                float maxR = 0;
+                                for (auto& n : app.artistNodes) maxR = std::max(maxR, glm::length(n.pos));
+                                app.camera.flyTo(glm::vec3(0), maxR * 1.5f);
+                            } else {
+                                app.selectedArtist = hit; app.selectedAlbum = -1;
+                                app.artistNodes[hit].isSelected = true;
+                                app.currentLevel = G_ARTIST_LEVEL; app.camera.autoRotate = false;
+                                app.camera.flyTo(app.artistNodes[hit].pos, app.artistNodes[hit].idealCameraDist);
+                            }
                         }
                     }
                 }

@@ -12,6 +12,10 @@
 #include <taglib/fileref.h>
 #include <taglib/tag.h>
 #include <taglib/tpropertymap.h>
+#include <taglib/mpegfile.h>
+#include <taglib/id3v2tag.h>
+#include <taglib/attachedpictureframe.h>
+#include <taglib/flacfile.h>
 
 namespace fs = std::filesystem;
 
@@ -36,6 +40,9 @@ struct AlbumData {
     std::string artist;
     int year = 0;
     std::vector<TrackData> tracks;
+    // Cover art (raw image data for GL texture creation)
+    std::vector<unsigned char> coverArtData;
+    int coverArtW = 0, coverArtH = 0;
 };
 
 struct ArtistData {
@@ -81,6 +88,36 @@ inline std::vector<std::string> scanDirectory(const std::string& dirPath) {
         std::cerr << "[Planetary] Scan error: " << e.what() << std::endl;
     }
     return files;
+}
+
+// Extract cover art from an audio file (MP3 ID3v2 or FLAC)
+inline std::vector<unsigned char> extractCoverArt(const std::string& path) {
+    std::string ext = fs::path(path).extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+    if (ext == ".mp3") {
+        TagLib::MPEG::File f(path.c_str());
+        if (f.isValid() && f.ID3v2Tag()) {
+            auto frames = f.ID3v2Tag()->frameListMap()["APIC"];
+            if (!frames.isEmpty()) {
+                auto* pic = dynamic_cast<TagLib::ID3v2::AttachedPictureFrame*>(frames.front());
+                if (pic) {
+                    auto data = pic->picture();
+                    return std::vector<unsigned char>(data.begin(), data.end());
+                }
+            }
+        }
+    } else if (ext == ".flac") {
+        TagLib::FLAC::File f(path.c_str());
+        if (f.isValid()) {
+            auto pics = f.pictureList();
+            if (!pics.isEmpty()) {
+                auto data = pics.front()->data();
+                return std::vector<unsigned char>(data.begin(), data.end());
+            }
+        }
+    }
+    return {};
 }
 
 inline MusicLibrary scanMusicLibrary(const std::string& dirPath,
@@ -154,6 +191,13 @@ inline MusicLibrary scanMusicLibrary(const std::string& dirPath,
             artist.totalTracks += (int)albumData.tracks.size();
             lib.totalAlbums++;
         }
+        // Extract cover art for each album (from first track)
+        for (auto& album : artist.albums) {
+            if (album.coverArtData.empty() && !album.tracks.empty()) {
+                album.coverArtData = extractCoverArt(album.tracks[0].filePath);
+            }
+        }
+
         // Sort albums by year
         std::sort(artist.albums.begin(), artist.albums.end(),
             [](const AlbumData& a, const AlbumData& b) {
