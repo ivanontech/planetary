@@ -1113,61 +1113,78 @@ void renderScene(App& app) {
                         glm::vec4(starColor * 0.3f, waveA), waveR);
                 }
 
-                // SOLAR FLARES -- particles erupting from star, driven by music
+                // SOLAR FLARES -- organic flame tongues erupting with the beat
                 glBindTexture(GL_TEXTURE_2D, app.texParticle);
-                int numFlares = 20;
+                int numFlares = 35;
                 for (int fi = 0; fi < numFlares; fi++) {
                     float seed = (float)fi * 137.508f + n.hue * 50.0f;
-                    float beatPhase = app.elapsedTime * (1.0f + (fi % 5) * 0.4f) + seed;
-
-                    // Eruption lifecycle -- triggered by audio beats
-                    float lifecycle = fmodf(beatPhase * 0.3f, 1.0f);
-                    float eruptForce = sinf(lifecycle * (float)M_PI); // 0->1->0
-                    eruptForce *= (0.3f + app.audioWave * 0.7f); // Stronger with music
-
-                    if (eruptForce < 0.05f) continue; // Skip weak flares
-
-                    // Direction from star surface
-                    float theta = seed * 2.39996f; // golden angle
-                    float phi = sinf(seed * 1.618f) * (float)M_PI;
-                    glm::vec3 dir(
-                        sinf(phi) * cosf(theta),
-                        sinf(phi) * sinf(theta) * 0.6f,
-                        cosf(phi)
-                    );
-
-                    // Distance from star center -- shoots outward
-                    float dist = coreSize * (1.0f + eruptForce * 3.0f);
-                    glm::vec3 flarePos = n.pos + dir * dist;
-
-                    // Size grows as it erupts
-                    float flareSize = coreSize * (0.05f + eruptForce * 0.2f);
-
-                    // Color: hot white -> orange -> red as it flies out
-                    glm::vec3 flareCol = glm::mix(
-                        glm::vec3(1.0f, 0.95f, 0.8f),
-                        glm::mix(starColor, glm::vec3(1.0f, 0.4f, 0.15f), 0.5f),
-                        eruptForce
-                    );
-
-                    float flareAlpha = eruptForce * 0.12f;
-                    app.billboard.draw(flarePos, glm::vec4(flareCol, flareAlpha), flareSize);
+                    
+                    // Each flare has its own beat-driven lifecycle
+                    float beatSync = app.audioBass * 2.0f + app.audioWave * 1.5f;
+                    float phase = app.elapsedTime * (0.5f + (fi % 7) * 0.2f) + seed;
+                    float lifecycle = fmodf(phase * 0.25f, 1.0f);
+                    float erupt = sinf(lifecycle * (float)M_PI);
+                    erupt *= (0.2f + beatSync * 0.4f);
+                    
+                    if (erupt < 0.03f) continue;
+                    
+                    // Organic direction -- each flare follows a curved path
+                    float theta = seed * 2.39996f + sinf(app.elapsedTime * 0.3f + fi) * 0.3f;
+                    float phi = sinf(seed * 1.618f) * (float)M_PI + cosf(app.elapsedTime * 0.2f) * 0.2f;
+                    glm::vec3 dir(sinf(phi)*cosf(theta), sinf(phi)*sinf(theta)*0.7f, cosf(phi));
+                    
+                    // Multiple particles per flare to create a flame tongue
+                    for (int p = 0; p < 3; p++) {
+                        float pDist = coreSize * (1.0f + erupt * (1.5f + p * 1.2f));
+                        float pSize = coreSize * (0.12f - p * 0.03f) * (0.5f + erupt);
+                        float pAlpha = (0.08f + erupt * 0.06f) * (1.0f - p * 0.25f);
+                        
+                        // Slight offset for organic feel
+                        glm::vec3 offset(sinf(seed+p)*0.05f, cosf(seed*2+p)*0.05f, sinf(seed*3+p)*0.05f);
+                        glm::vec3 fpos = n.pos + dir * pDist + offset * coreSize;
+                        
+                        // Color gradient: hot white -> star color -> deep orange/red
+                        glm::vec3 col;
+                        if (p == 0) col = glm::vec3(1.0f, 0.95f, 0.85f);
+                        else if (p == 1) col = glm::mix(starColor, glm::vec3(1.0f, 0.6f, 0.2f), 0.5f);
+                        else col = glm::vec3(0.9f, 0.3f, 0.08f);
+                        
+                        app.billboard.draw(fpos, glm::vec4(col, pAlpha), pSize);
+                    }
                 }
-
-                // Plasma gas clouds -- slower, larger, drifting
+                
+                // NEBULA GAS EMISSIONS -- large colored clouds driven by bass
                 glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-                for (int gi = 0; gi < 6; gi++) {
-                    float gasAngle = app.elapsedTime * 0.08f + (float)gi * 1.047f;
-                    float gasR = coreSize * (1.3f + sinf(app.elapsedTime * 0.3f + gi) * 0.3f);
-                    gasR += app.audioWave * coreSize * 0.5f;
-                    glm::vec3 gasPos = n.pos + glm::vec3(
-                        cosf(gasAngle) * gasR,
-                        sinf(gasAngle * 0.7f + gi) * gasR * 0.3f,
-                        sinf(gasAngle) * gasR
-                    );
-                    float gasSize = coreSize * (0.3f + app.audioBass * 0.2f);
-                    glm::vec3 gasCol = glm::mix(starColor, glm::vec3(1.0f, 0.6f, 0.3f), 0.4f);
-                    app.billboard.draw(gasPos, glm::vec4(gasCol, 0.03f + app.audioWave * 0.02f), gasSize);
+                // Multiple nebula colors based on star + random
+                glm::vec3 nebColors[] = {
+                    glm::mix(starColor, glm::vec3(0.2f, 0.4f, 1.0f), 0.6f),  // Blue
+                    glm::mix(starColor, glm::vec3(0.8f, 0.2f, 0.5f), 0.5f),  // Magenta
+                    glm::mix(starColor, glm::vec3(1.0f, 0.5f, 0.1f), 0.4f),  // Orange
+                    glm::mix(starColor, glm::vec3(0.3f, 0.8f, 0.6f), 0.5f),  // Teal
+                    glm::mix(starColor, glm::vec3(0.6f, 0.2f, 0.8f), 0.5f),  // Purple
+                    glm::vec3(1.0f, 0.7f, 0.3f),                              // Gold
+                    glm::vec3(0.3f, 0.6f, 1.0f),                              // Bright blue
+                    glm::vec3(0.8f, 0.3f, 0.3f),                              // Warm red
+                };
+                int numGas = 12;
+                for (int gi = 0; gi < numGas; gi++) {
+                    float ga = app.elapsedTime * (0.03f + gi * 0.008f) + (float)gi * 0.524f;
+                    float bassForce = app.audioBass * 1.5f;
+                    float gasR = coreSize * (1.5f + sinf(ga * 2.3f + gi) * 0.5f + bassForce * 1.0f);
+                    float gasY = sinf(ga * 0.7f + gi * 1.2f) * gasR * 0.4f;
+                    glm::vec3 gpos = n.pos + glm::vec3(cosf(ga)*gasR, gasY, sinf(ga)*gasR);
+                    
+                    // Size pulses with bass
+                    float gsize = coreSize * (0.4f + app.audioBass * 0.4f + sinf(ga * 1.5f) * 0.1f);
+                    
+                    glm::vec3 gcol = nebColors[gi % 8];
+                    float galpha = 0.02f + app.audioWave * 0.02f + app.audioBass * 0.01f;
+                    
+                    app.billboard.draw(gpos, glm::vec4(gcol, galpha), gsize);
+                    
+                    // Second layer slightly offset for depth
+                    glm::vec3 gpos2 = gpos + glm::vec3(sinf(ga)*coreSize*0.3f, coreSize*0.1f, cosf(ga)*coreSize*0.2f);
+                    app.billboard.draw(gpos2, glm::vec4(gcol * 0.7f, galpha * 0.6f), gsize * 0.7f);
                 }
             }
             glDepthMask(GL_TRUE);
