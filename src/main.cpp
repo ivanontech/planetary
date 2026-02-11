@@ -750,22 +750,24 @@ void renderScene(App& app) {
     glm::mat4 view = app.camera.viewMatrix();
     glm::mat4 proj = app.camera.projMatrix();
 
-    // --- Skydome: galaxy/nebula background (original: skydomeFull.png) ---
+    bool isZoomedToStar = (app.selectedArtist >= 0);
+
+    // --- Background: pure black clear + dim point stars only ---
     glDepthMask(GL_FALSE);
     glDisable(GL_DEPTH_TEST);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    app.planetShader.use();
-    app.planetShader.setMat4("uView", glm::value_ptr(view));
-    app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
-    glBindTexture(GL_TEXTURE_2D, app.texSkydome);
-    {
-        // Huge sphere centered on camera, always surrounds the viewer
+
+    // Only show skydome at galaxy level (it washes out when zoomed in)
+    if (!isZoomedToStar) {
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        app.planetShader.use();
+        app.planetShader.setMat4("uView", glm::value_ptr(view));
+        app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
+        glBindTexture(GL_TEXTURE_2D, app.texSkydome);
         glm::mat4 skyM = glm::translate(glm::mat4(1.0f), app.camera.position);
         skyM = glm::scale(skyM, glm::vec3(900.0f));
         app.planetShader.setMat4("uModel", glm::value_ptr(skyM));
-        // VERY dark nebula -- space must be nearly black
-        app.planetShader.setVec3("uColor", 0.03f, 0.04f, 0.07f);
-        app.planetShader.setVec3("uEmissive", 0.008f, 0.012f, 0.025f);
+        app.planetShader.setVec3("uColor", 0.02f, 0.03f, 0.05f);
+        app.planetShader.setVec3("uEmissive", 0.005f, 0.008f, 0.015f);
         app.planetShader.setFloat("uEmissiveStrength", 1.0f);
         app.planetShader.setVec3("uLightPos", 0, 0, 0);
         glCullFace(GL_FRONT); glEnable(GL_CULL_FACE);
@@ -773,7 +775,7 @@ void renderScene(App& app) {
         glDisable(GL_CULL_FACE);
     }
 
-    // --- Background stars ---
+    // Background point stars (always)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE);
     app.starPointShader.use();
     app.starPointShader.setMat4("uView", glm::value_ptr(view));
@@ -783,33 +785,27 @@ void renderScene(App& app) {
     app.starPointShader.setInt("uTexture", 0);
     app.bgStars.draw();
 
-    // --- Star glows (additive billboards) ---
-    // Original Planetary: only selected star has massive glow
-    // Other stars have subtle small halos
+    // --- Star rendering ---
     app.billboardShader.use();
     app.billboardShader.setMat4("uView", glm::value_ptr(view));
     app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
     glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
 
     for (auto& n : app.artistNodes) {
-        float distToCam = glm::length(n.pos - app.camera.position);
-
         if (n.isSelected) {
-            // Selected star: massive bright glow like the original
-            float pulse = 1.0f + sinf(app.elapsedTime * 1.5f) * 0.1f;
-            float sz = n.glowRadius * 25.0f * pulse;
-            app.billboard.draw(n.pos, glm::vec4(n.glowColor, 0.4f), sz);
-            // Inner hot glow
-            app.billboard.draw(n.pos, glm::vec4(1.0f, 1.0f, 1.0f, 0.25f), sz * 0.3f);
-        } else {
-            // Non-selected: tiny pinpoint of light
-            float maxDist = 800.0f;
-            float distFade = std::clamp(1.0f - (distToCam / maxDist), 0.0f, 1.0f);
-            if (distFade < 0.01f) continue;
-            float sz = n.glowRadius * 1.0f;
-            float alpha = 0.03f * distFade;
-            app.billboard.draw(n.pos, glm::vec4(n.glowColor, alpha), sz);
+            // Selected star rendered below with planets
+            continue;
         }
+
+        // When zoomed to a star, SKIP all other star glows
+        // This is the key fix -- 1300 overlapping additive glows = whiteout
+        if (isZoomedToStar) continue;
+
+        // Galaxy view: tiny colored dots
+        float distToCam = glm::length(n.pos - app.camera.position);
+        float distFade = std::clamp(1.0f - (distToCam / 800.0f), 0.0f, 1.0f);
+        if (distFade < 0.01f) continue;
+        app.billboard.draw(n.pos, glm::vec4(n.glowColor, 0.04f * distFade), n.glowRadius * 1.2f);
     }
 
     glDepthMask(GL_TRUE);
