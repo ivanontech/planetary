@@ -1115,45 +1115,73 @@ void renderScene(App& app) {
                         glm::vec4(starColor * 0.3f, waveA), waveR);
                 }
 
-                // SOLAR FLARES -- organic flame tongues erupting with the beat
-                glBindTexture(GL_TEXTURE_2D, app.texParticle);
-                int numFlares = 35;
-                for (int fi = 0; fi < numFlares; fi++) {
+                // SOLAR FLAME STREAKS -- elongated arcs reaching outward with the beat
+                // No circles -- these are LINE-based prominences and coronal arcs
+                int numFlames = 24;
+                for (int fi = 0; fi < numFlames; fi++) {
                     float seed = (float)fi * 137.508f + n.hue * 50.0f;
-                    
-                    // Each flare has its own beat-driven lifecycle
-                    float beatSync = app.audioBass * 2.0f + app.audioWave * 1.5f;
-                    float phase = app.elapsedTime * (0.5f + (fi % 7) * 0.2f) + seed;
-                    float lifecycle = fmodf(phase * 0.25f, 1.0f);
+                    float beatSync = app.audioBass * 2.5f + app.audioWave * 2.0f;
+                    float phase = app.elapsedTime * (0.3f + (fi % 5) * 0.15f) + seed;
+                    float lifecycle = fmodf(phase * 0.2f, 1.0f);
                     float erupt = sinf(lifecycle * (float)M_PI);
-                    erupt *= (0.2f + beatSync * 0.4f);
+                    erupt *= (0.15f + beatSync * 0.5f);
                     
-                    if (erupt < 0.03f) continue;
+                    if (erupt < 0.02f) continue;
                     
-                    // Organic direction -- each flare follows a curved path
-                    float theta = seed * 2.39996f + sinf(app.elapsedTime * 0.3f + fi) * 0.3f;
-                    float phi = sinf(seed * 1.618f) * (float)M_PI + cosf(app.elapsedTime * 0.2f) * 0.2f;
-                    glm::vec3 dir(sinf(phi)*cosf(theta), sinf(phi)*sinf(theta)*0.7f, cosf(phi));
+                    // Base direction on star surface
+                    float theta = seed * 2.39996f + sinf(app.elapsedTime * 0.2f + fi) * 0.4f;
+                    float phi2 = sinf(seed * 1.618f) * (float)M_PI;
+                    glm::vec3 baseDir(sinf(phi2)*cosf(theta), sinf(phi2)*sinf(theta)*0.7f, cosf(phi2));
                     
-                    // Multiple particles per flare to create a flame tongue
-                    for (int p = 0; p < 3; p++) {
-                        float pDist = coreSize * (1.0f + erupt * (1.5f + p * 1.2f));
-                        float pSize = coreSize * (0.12f - p * 0.03f) * (0.5f + erupt);
-                        float pAlpha = (0.08f + erupt * 0.06f) * (1.0f - p * 0.25f);
+                    // Build a curved flame arc (10-20 segments)
+                    int segs = 10 + (int)(erupt * 10.0f);
+                    float reachDist = coreSize * (0.5f + erupt * 4.0f); // Further with beat!
+                    
+                    std::vector<float> flameVerts;
+                    for (int s = 0; s <= segs; s++) {
+                        float t = (float)s / (float)segs;
+                        // Arc curves outward then bends back (like real solar prominences)
+                        float outward = sinf(t * (float)M_PI) * reachDist;
+                        float lateral = sinf(t * (float)M_PI * 1.5f + seed) * reachDist * 0.3f;
                         
-                        // Slight offset for organic feel
-                        glm::vec3 offset(sinf(seed+p)*0.05f, cosf(seed*2+p)*0.05f, sinf(seed*3+p)*0.05f);
-                        glm::vec3 fpos = n.pos + dir * pDist + offset * coreSize;
+                        glm::vec3 tangent = glm::normalize(glm::cross(baseDir, glm::vec3(0,1,0) + glm::vec3(sinf(seed),0,cosf(seed))*0.3f));
+                        glm::vec3 pt = n.pos + baseDir * (coreSize + outward) + tangent * lateral;
+                        pt.y += sinf(t * (float)M_PI) * reachDist * 0.4f * sinf(seed * 2.0f);
                         
-                        // Color gradient: hot white -> star color -> deep orange/red
-                        glm::vec3 col;
-                        if (p == 0) col = glm::vec3(1.0f, 0.95f, 0.85f);
-                        else if (p == 1) col = glm::mix(starColor, glm::vec3(1.0f, 0.6f, 0.2f), 0.5f);
-                        else col = glm::vec3(0.9f, 0.3f, 0.08f);
-                        
-                        app.billboard.draw(fpos, glm::vec4(col, pAlpha), pSize);
+                        flameVerts.push_back(pt.x);
+                        flameVerts.push_back(pt.y);
+                        flameVerts.push_back(pt.z);
                     }
+                    
+                    GLuint fvao, fvbo;
+                    glGenVertexArrays(1, &fvao); glGenBuffers(1, &fvbo);
+                    glBindVertexArray(fvao); glBindBuffer(GL_ARRAY_BUFFER, fvbo);
+                    glBufferData(GL_ARRAY_BUFFER, flameVerts.size()*sizeof(float), flameVerts.data(), GL_STREAM_DRAW);
+                    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3*sizeof(float), 0);
+                    glEnableVertexAttribArray(0);
+                    
+                    // Color based on distance: hot white base -> orange -> red tip
+                    glm::vec3 flameCol = glm::mix(glm::vec3(1.0f, 0.9f, 0.6f), n.color * 0.8f + glm::vec3(0.5f, 0.15f, 0.05f), 0.4f);
+                    float flameAlpha = erupt * 0.15f;
+                    
+                    app.ringShader.use();
+                    app.ringShader.setMat4("uView", glm::value_ptr(view));
+                    app.ringShader.setMat4("uProjection", glm::value_ptr(proj));
+                    glm::mat4 id2(1.0f);
+                    app.ringShader.setMat4("uModel", glm::value_ptr(id2));
+                    app.ringShader.setVec4("uColor", flameCol.r, flameCol.g, flameCol.b, flameAlpha);
+                    glLineWidth(2.0f);
+                    glDrawArrays(GL_LINE_STRIP, 0, segs + 1);
+                    glLineWidth(1.0f);
+                    
+                    glDeleteBuffers(1, &fvbo); glDeleteVertexArrays(1, &fvao);
                 }
+                
+                // Restore billboard shader
+                app.billboardShader.use();
+                app.billboardShader.setMat4("uView", glm::value_ptr(view));
+                app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
+                glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
                 
                 // === NEBULA GAS + GRAVITY LOOPS + WAVELENGTHS ===
                 
