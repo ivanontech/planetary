@@ -802,12 +802,12 @@ void renderScene(App& app) {
             // Inner hot glow
             app.billboard.draw(n.pos, glm::vec4(1.0f, 1.0f, 1.0f, 0.25f), sz * 0.3f);
         } else {
-            // Non-selected: tiny subtle glow dot
+            // Non-selected: tiny colored dot
             float maxDist = 800.0f;
             float distFade = std::clamp(1.0f - (distToCam / maxDist), 0.0f, 1.0f);
             if (distFade < 0.01f) continue;
-            float sz = n.glowRadius * 2.0f;
-            float alpha = 0.1f * distFade;
+            float sz = n.glowRadius * 1.5f;
+            float alpha = 0.05f * distFade;
             app.billboard.draw(n.pos, glm::vec4(n.glowColor, alpha), sz);
         }
     }
@@ -828,47 +828,46 @@ void renderScene(App& app) {
             float starSize = n.radius * 0.35f;
 
             // Star sphere with starCore texture - the MAIN bright element
-            // === EXACT ORIGINAL PLANETARY STAR RENDERING ===
-            // Original: small textured sphere (0.16x radius) + layered additive glow billboards
-            // NO flame particles -- the "flames" look comes from layered additive blending
+            // Star rendering: textured sphere + subtle layered glow
+            // The glow alphas must be VERY LOW or they wash out the dark background
 
-            // 1. Star core sphere -- starCore.png, 0.16x radius (original exact value)
+            // Star core sphere -- the main visible element
+            float coreSize = starSize * 0.3f;
             glBindTexture(GL_TEXTURE_2D, app.texStarCore);
             glm::mat4 m = glm::translate(glm::mat4(1.0f), n.pos);
-            m = glm::rotate(m, app.elapsedTime * 0.75f, glm::vec3(0, 1, n.hue));
-            m = glm::scale(m, glm::vec3(starSize * 0.16f));
+            m = glm::rotate(m, app.elapsedTime * 0.5f, glm::vec3(0, 1, n.hue));
+            m = glm::scale(m, glm::vec3(coreSize));
             app.planetShader.setMat4("uModel", glm::value_ptr(m));
-            // Original: (mColor + white) * 0.5
             glm::vec3 coreColor = (n.color + glm::vec3(1.0f)) * 0.5f;
             app.planetShader.setVec3("uColor", coreColor.r, coreColor.g, coreColor.b);
-            app.planetShader.setVec3("uEmissive", coreColor.r, coreColor.g, coreColor.b);
-            app.planetShader.setFloat("uEmissiveStrength", 0.3f);
+            app.planetShader.setVec3("uEmissive", coreColor.r * 0.5f, coreColor.g * 0.5f, coreColor.b * 0.5f);
+            app.planetShader.setFloat("uEmissiveStrength", 0.4f);
             app.planetShader.setVec3("uLightPos", n.pos.x, n.pos.y + 5.0f, n.pos.z);
             app.sphereHi.draw();
 
-            // 2. Layered additive glow billboards (original method)
+            // Additive glow layers -- VERY LOW alpha to preserve dark background
             glDepthMask(GL_FALSE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);
             app.billboardShader.use();
             app.billboardShader.setMat4("uView", glm::value_ptr(view));
             app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
 
-            // Layer 1: atmosphereSun -- tight atmosphere (original: 2.42 * 0.16 = 0.387x)
+            // Tight atmosphere around the sphere
             glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
             app.billboard.draw(n.pos,
-                glm::vec4((n.color + glm::vec3(1.0f)) * 0.5f, 0.35f),
-                starSize * 0.5f);
+                glm::vec4(coreColor, 0.12f),
+                coreSize * 2.5f);
 
-            // Layer 2: starGlow -- main glow (original: 15x radius)
+            // Colored glow halo
             glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
             app.billboard.draw(n.pos,
-                glm::vec4(n.glowColor, 0.3f),
-                starSize * 15.0f);
+                glm::vec4(n.glowColor, 0.06f),
+                starSize * 6.0f);
 
-            // Layer 3: extraGlow -- inner bright white glow (original: 7.5x radius)
+            // Faint outer corona
             app.billboard.draw(n.pos,
-                glm::vec4(1.0f, 1.0f, 1.0f, 0.15f),
-                starSize * 7.5f);
+                glm::vec4(n.glowColor * 0.5f, 0.02f),
+                starSize * 12.0f);
 
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
