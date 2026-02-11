@@ -30,6 +30,7 @@
 #include "shader.h"
 #include "camera.h"
 #include "music_data.h"
+#include "miniaudio.h"
 
 // ============================================================
 // FORCE DISCRETE GPU (NVIDIA / AMD)
@@ -343,14 +344,13 @@ struct BillboardQuad {
 };
 
 // ============================================================
-// AUDIO PLAYER - SDL2 audio for music playback
+// AUDIO PLAYER - miniaudio (supports MP3, FLAC, WAV, OGG, etc.)
 // ============================================================
 struct AudioPlayer {
-    SDL_AudioDeviceID device = 0;
-    SDL_AudioSpec spec{};
-    Uint8* audioBuffer = nullptr;
-    Uint32 audioLength = 0;
-    Uint32 audioPos = 0;
+    ma_engine engine;
+    ma_sound sound;
+    bool engineInit = false;
+    bool soundInit = false;
     bool playing = false;
     float volume = 0.8f;
     std::string currentTrack;
@@ -358,87 +358,88 @@ struct AudioPlayer {
     std::string currentArtist;
     std::string currentAlbum;
     float duration = 0;
-    std::mutex mtx;
 
     void init() {
-        SDL_AudioSpec want{};
-        want.freq = 44100;
-        want.format = AUDIO_S16LSB;
-        want.channels = 2;
-        want.samples = 4096;
-        want.callback = audioCallback;
-        want.userdata = this;
-        device = SDL_OpenAudioDevice(nullptr, 0, &want, &spec, 0);
-        if (device == 0) {
-            std::cerr << "[Audio] Failed to open: " << SDL_GetError() << std::endl;
+        ma_engine_config config = ma_engine_config_init();
+        if (ma_engine_init(&config, &engine) != MA_SUCCESS) {
+            std::cerr << "[Audio] Failed to init miniaudio engine" << std::endl;
+            return;
         }
-    }
-
-    static void audioCallback(void* userdata, Uint8* stream, int len) {
-        auto* self = (AudioPlayer*)userdata;
-        std::lock_guard<std::mutex> lock(self->mtx);
-        SDL_memset(stream, 0, len);
-        if (!self->playing || !self->audioBuffer) return;
-        Uint32 remaining = self->audioLength - self->audioPos;
-        Uint32 toPlay = std::min((Uint32)len, remaining);
-        SDL_MixAudioFormat(stream, self->audioBuffer + self->audioPos,
-            self->spec.format, toPlay, (int)(self->volume * SDL_MIX_MAXVOLUME));
-        self->audioPos += toPlay;
-        if (self->audioPos >= self->audioLength) {
-            self->playing = false;
-        }
-    }
-
-    bool loadWav(const std::string& path) {
-        std::lock_guard<std::mutex> lock(mtx);
-        if (audioBuffer) { SDL_FreeWAV(audioBuffer); audioBuffer = nullptr; }
-        SDL_AudioSpec wavSpec;
-        if (!SDL_LoadWAV(path.c_str(), &wavSpec, &audioBuffer, &audioLength)) {
-            std::cerr << "[Audio] Can't load WAV: " << path << " - " << SDL_GetError() << std::endl;
-            return false;
-        }
-        audioPos = 0;
-        playing = true;
-        SDL_PauseAudioDevice(device, 0);
-        return true;
+        engineInit = true;
+        ma_engine_set_volume(&engine, volume);
+        std::cout << "[Audio] miniaudio engine ready (MP3/FLAC/WAV/OGG)" << std::endl;
     }
 
     void play(const std::string& path, const std::string& name, const std::string& artist, const std::string& album, float dur) {
+        if (!engineInit) return;
+
+        // Stop current track
+        if (soundInit) {
+            ma_sound_uninit(&sound);
+            soundInit = false;
+        }
+
         currentTrack = path;
         currentTrackName = name;
         currentArtist = artist;
         currentAlbum = album;
         duration = dur;
-        // Try to load as WAV (SDL2 native format)
-        if (!loadWav(path)) {
-            std::cout << "[Audio] WAV load failed for: " << name << " (non-WAV files need SDL2_mixer)" << std::endl;
+
+        if (ma_sound_init_from_file(&engine, path.c_str(), 0, nullptr, nullptr, &sound) != MA_SUCCESS) {
+            std::cerr << "[Audio] Failed to load: " << path << std::endl;
+            return;
         }
+        soundInit = true;
+        ma_sound_start(&sound);
+        playing = true;
+        std::cout << "[Audio] Playing: " << name << " by " << artist << std::endl;
     }
 
     void togglePause() {
-        playing = !playing;
-        SDL_PauseAudioDevice(device, playing ? 0 : 1);
+        if (!soundInit) return;
+        if (playing) {
+            ma_sound_stop(&sound);
+            playing = false;
+        } else {
+            ma_sound_start(&sound);
+            playing = true;
+        }
     }
 
     void stop() {
-        std::lock_guard<std::mutex> lock(mtx);
-        playing = false;
-        SDL_PauseAudioDevice(device, 1);
+        if (soundInit) {
+            ma_sound_stop(&sound);
+            playing = false;
+        }
     }
 
     float progress() const {
-        if (audioLength == 0) return 0;
-        return (float)audioPos / (float)audioLength;
+        if (!soundInit || duration <= 0) return 0;
+        float cursor = 0;
+        ma_sound_get_cursor_in_seconds(&sound, &cursor);
+        return cursor / duration;
     }
 
     float currentTime() const {
-        return progress() * duration;
+        if (!soundInit) return 0;
+        float cursor = 0;
+        ma_sound_get_cursor_in_seconds(&sound, &cursor);
+        return cursor;
+    }
+
+    void setVolume(float v) {
+        volume = v;
+        if (engineInit) ma_engine_set_volume(&engine, v);
+    }
+
+    bool isAtEnd() const {
+        if (!soundInit) return false;
+        return ma_sound_at_end(&sound);
     }
 
     void cleanup() {
-        stop();
-        if (audioBuffer) SDL_FreeWAV(audioBuffer);
-        if (device) SDL_CloseAudioDevice(device);
+        if (soundInit) ma_sound_uninit(&sound);
+        if (engineInit) ma_engine_uninit(&engine);
     }
 };
 
@@ -609,13 +610,15 @@ void buildScene(App& app) {
 // RENDERING
 // ============================================================
 void render(App& app) {
+    glClearColor(0.0f, 0.0f, 0.005f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glm::mat4 view = app.camera.viewMatrix();
     glm::mat4 proj = app.camera.projMatrix();
 
-    // Background stars
+    // --- PASS 1: Background stars (point sprites, additive) ---
     glDepthMask(GL_FALSE);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    glDisable(GL_DEPTH_TEST);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);  // Additive for glows on dark bg
     app.starPointShader.use();
     app.starPointShader.setMat4("uView", glm::value_ptr(view));
     app.starPointShader.setMat4("uProjection", glm::value_ptr(proj));
@@ -624,7 +627,8 @@ void render(App& app) {
     app.starPointShader.setInt("uTexture", 0);
     app.bgStars.draw();
 
-    // Star glows
+    // --- PASS 2: Star glows (billboards, additive) ---
+    // Original: 15x radius billboard with starGlow texture, additive blend
     app.billboardShader.use();
     app.billboardShader.setMat4("uView", glm::value_ptr(view));
     app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
@@ -632,9 +636,13 @@ void render(App& app) {
     for (auto& n : app.artistNodes) {
         float pulse = 1.0f + sinf(app.elapsedTime * 1.5f + (float)n.index) * 0.08f;
         float sz = n.glowRadius * 15.0f * pulse * (n.isSelected ? 1.3f : 1.0f);
-        app.billboard.draw(n.pos, glm::vec4(n.glowColor, n.isSelected ? 0.7f : 0.5f), sz);
+        float alpha = n.isSelected ? 0.6f : 0.35f;
+        app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.7f, alpha), sz);
     }
+
+    // Reset blending for solid objects
     glDepthMask(GL_TRUE);
+    glEnable(GL_DEPTH_TEST);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     // Star cores
@@ -690,14 +698,16 @@ void render(App& app) {
             app.planetShader.setFloat("uEmissiveStrength", ai == app.selectedAlbum ? 0.4f : 0.15f);
             app.sphereMd.draw();
 
-            // Atmosphere
-            glDepthMask(GL_FALSE); glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+            // Atmosphere glow (additive, no depth write)
+            glDepthMask(GL_FALSE);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE);
             app.billboardShader.use();
             app.billboardShader.setMat4("uView", glm::value_ptr(view));
             app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
             glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
-            app.billboard.draw(apos, glm::vec4(star.glowColor, 0.25f), o.planetSize * 4.84f);
-            glDepthMask(GL_TRUE); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            app.billboard.draw(apos, glm::vec4(star.glowColor * 0.6f, 0.3f), o.planetSize * 4.84f);
+            glDepthMask(GL_TRUE);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
             // Track moons for selected album
             if (ai == app.selectedAlbum) {
@@ -853,7 +863,9 @@ void renderUI(App& app) {
         // Volume
         ImGui::SameLine();
         ImGui::SetNextItemWidth(80);
-        ImGui::SliderFloat("##vol", &app.audio.volume, 0.0f, 1.0f, "");
+        if (ImGui::SliderFloat("##vol", &app.audio.volume, 0.0f, 1.0f, "")) {
+            app.audio.setVolume(app.audio.volume);
+        }
 
         ImGui::End();
     }
