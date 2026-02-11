@@ -763,9 +763,9 @@ void renderScene(App& app) {
         glm::mat4 skyM = glm::translate(glm::mat4(1.0f), app.camera.position);
         skyM = glm::scale(skyM, glm::vec3(900.0f));
         app.planetShader.setMat4("uModel", glm::value_ptr(skyM));
-        // Dark teal nebula -- space should feel vast and dark
-        app.planetShader.setVec3("uColor", 0.08f, 0.12f, 0.2f);
-        app.planetShader.setVec3("uEmissive", 0.02f, 0.035f, 0.07f);
+        // VERY dark nebula -- space must be nearly black
+        app.planetShader.setVec3("uColor", 0.03f, 0.04f, 0.07f);
+        app.planetShader.setVec3("uEmissive", 0.008f, 0.012f, 0.025f);
         app.planetShader.setFloat("uEmissiveStrength", 1.0f);
         app.planetShader.setVec3("uLightPos", 0, 0, 0);
         glCullFace(GL_FRONT); glEnable(GL_CULL_FACE);
@@ -802,12 +802,12 @@ void renderScene(App& app) {
             // Inner hot glow
             app.billboard.draw(n.pos, glm::vec4(1.0f, 1.0f, 1.0f, 0.25f), sz * 0.3f);
         } else {
-            // Non-selected: tiny colored dot
+            // Non-selected: tiny pinpoint of light
             float maxDist = 800.0f;
             float distFade = std::clamp(1.0f - (distToCam / maxDist), 0.0f, 1.0f);
             if (distFade < 0.01f) continue;
-            float sz = n.glowRadius * 1.5f;
-            float alpha = 0.05f * distFade;
+            float sz = n.glowRadius * 1.0f;
+            float alpha = 0.03f * distFade;
             app.billboard.draw(n.pos, glm::vec4(n.glowColor, alpha), sz);
         }
     }
@@ -828,46 +828,25 @@ void renderScene(App& app) {
             float starSize = n.radius * 0.35f;
 
             // Star sphere with starCore texture - the MAIN bright element
-            // Star rendering: textured sphere + subtle layered glow
-            // The glow alphas must be VERY LOW or they wash out the dark background
-
-            // Star core sphere -- the main visible element
-            float coreSize = starSize * 0.3f;
-            glBindTexture(GL_TEXTURE_2D, app.texStarCore);
-            glm::mat4 m = glm::translate(glm::mat4(1.0f), n.pos);
-            m = glm::rotate(m, app.elapsedTime * 0.5f, glm::vec3(0, 1, n.hue));
-            m = glm::scale(m, glm::vec3(coreSize));
-            app.planetShader.setMat4("uModel", glm::value_ptr(m));
-            glm::vec3 coreColor = (n.color + glm::vec3(1.0f)) * 0.5f;
-            app.planetShader.setVec3("uColor", coreColor.r, coreColor.g, coreColor.b);
-            app.planetShader.setVec3("uEmissive", coreColor.r * 0.5f, coreColor.g * 0.5f, coreColor.b * 0.5f);
-            app.planetShader.setFloat("uEmissiveStrength", 0.4f);
-            app.planetShader.setVec3("uLightPos", n.pos.x, n.pos.y + 5.0f, n.pos.z);
-            app.sphereHi.draw();
-
-            // Additive glow layers -- VERY LOW alpha to preserve dark background
+            // Star = glowing BLOB (not a perfect sphere)
+            // Use starGlow billboard as the main star body for organic look
             glDepthMask(GL_FALSE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);
             app.billboardShader.use();
             app.billboardShader.setMat4("uView", glm::value_ptr(view));
             app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
 
-            // Tight atmosphere around the sphere
-            glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
-            app.billboard.draw(n.pos,
-                glm::vec4(coreColor, 0.12f),
-                coreSize * 2.5f);
+            glm::vec3 warmColor = glm::mix(n.color, glm::vec3(1.0f, 0.95f, 0.85f), 0.6f);
 
-            // Colored glow halo
+            // Hot white-yellow core blob (the star itself)
             glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-            app.billboard.draw(n.pos,
-                glm::vec4(n.glowColor, 0.06f),
-                starSize * 6.0f);
+            app.billboard.draw(n.pos, glm::vec4(1.0f, 0.98f, 0.9f, 0.7f), starSize * 1.0f);
 
-            // Faint outer corona
-            app.billboard.draw(n.pos,
-                glm::vec4(n.glowColor * 0.5f, 0.02f),
-                starSize * 12.0f);
+            // Colored mid glow (gives the star its color)
+            app.billboard.draw(n.pos, glm::vec4(warmColor, 0.25f), starSize * 2.0f);
+
+            // Faint corona -- VERY subtle, just a hint
+            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.3f, 0.03f), starSize * 4.0f);
 
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -968,9 +947,12 @@ void renderScene(App& app) {
             app.billboardShader.setMat4("uView", glm::value_ptr(view));
             app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
             glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
-            float atmoAlpha = (ai == app.selectedAlbum) ? 0.15f : 0.06f;
-            glm::vec3 atmoColor = glm::mix(planetColor, BRIGHT_BLUE, 0.3f);
-            app.billboard.draw(apos, glm::vec4(atmoColor, atmoAlpha), o.planetSize * 3.0f);
+            // Blue atmosphere ring -- like the original Planetary
+            glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
+            float atmoAlpha = (ai == app.selectedAlbum) ? 0.25f : 0.12f;
+            app.billboard.draw(apos,
+                glm::vec4(0.3f, 0.7f, 1.0f, atmoAlpha),  // cyan-blue atmosphere
+                o.planetSize * 2.5f);
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
