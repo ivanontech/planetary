@@ -472,7 +472,7 @@ struct App {
     Shader starPointShader, billboardShader, planetShader, ringShader;
     Shader bloomBrightShader, bloomBlurShader, bloomCompositeShader;
     GLuint texStarGlow=0, texAtmosphere=0, texStar=0, texSurface=0, texSkydome=0;
-    GLuint texLensFlare=0, texStarCore=0, texEclipseGlow=0;
+    GLuint texLensFlare=0, texStarCore=0, texEclipseGlow=0, texParticle=0;
     BackgroundStars bgStars;
     BillboardQuad billboard;
     SphereMesh sphereHi, sphereMd, sphereLo;
@@ -661,6 +661,7 @@ bool initResources(App& app) {
     app.texLensFlare = loadTexture("resources/lensFlare.png");
     app.texStarCore = loadTexture("resources/starCore.png");
     app.texEclipseGlow = loadTexture("resources/eclipseGlow.png");
+    app.texParticle = loadTexture("resources/particle.png");
 
     app.bgStars.create(8000);
     app.billboard.create();
@@ -851,31 +852,48 @@ void renderScene(App& app) {
             // Tiny corona
             app.billboard.draw(n.pos, glm::vec4(warmTint * 0.5f, 0.06f), starSize * 1.6f);
 
-            // FLAME PARTICLES flying off the star surface
-            glBindTexture(GL_TEXTURE_2D, app.texStar);
-            int numFlames = 30;
+            // FLAME PARTICLES -- using soft particle texture, organic movement
+            glBindTexture(GL_TEXTURE_2D, app.texParticle);
+            int numFlames = 40;
             for (int fi = 0; fi < numFlames; fi++) {
-                float seed = (float)fi * 137.508f + n.hue * 100.0f; // golden angle per flame
-                float t = app.elapsedTime * (0.3f + (float)(fi % 5) * 0.15f) + seed;
+                float seed = (float)fi * 137.508f + n.hue * 100.0f;
+                float speed = 0.4f + (float)(fi % 7) * 0.12f;
+                float t = app.elapsedTime * speed + seed;
 
-                // Flames orbit and fly outward from star surface
-                float orbitAngle = t * 0.8f;
-                float elevation = sinf(seed * 3.14f) * 0.6f;
-                float flameR = starSize * (1.1f + sinf(t * 2.0f + seed) * 0.15f +
-                    (float)(fi % 7) * 0.05f);
-                // Some flames shoot out further
-                if (fi % 5 == 0) flameR = starSize * (1.2f + sinf(t * 1.5f) * 0.4f);
+                // Flames erupt from surface and arc outward
+                float orbitAngle = t * 0.6f + sinf(t * 0.3f + seed) * 0.5f;
+                float elevation = sinf(seed * 2.17f) * 0.8f + sinf(t * 0.7f) * 0.2f;
+
+                // Life cycle: erupt outward then fade
+                float lifecycle = fmodf(t * 0.5f, 3.14159f) / 3.14159f; // 0 to 1
+                float eruptDist = sinf(lifecycle * 3.14159f); // peaks at 0.5
+                float flameR = starSize * (1.02f + eruptDist * 0.6f);
+
+                // Solar flares -- some go much further
+                if (fi % 8 == 0) {
+                    flameR = starSize * (1.05f + eruptDist * 1.2f);
+                }
 
                 glm::vec3 flamePos = n.pos + glm::vec3(
                     cosf(orbitAngle) * cosf(elevation) * flameR,
-                    sinf(elevation) * flameR * 0.8f,
+                    sinf(elevation) * flameR * 0.7f,
                     sinf(orbitAngle) * cosf(elevation) * flameR
                 );
 
-                float flameAlpha = 0.08f + sinf(t * 3.0f + seed) * 0.04f;
-                float flameSize = starSize * (0.15f + (float)(fi % 4) * 0.05f);
-                glm::vec3 flameColor = glm::mix(warmTint, glm::vec3(1.0f, 0.6f, 0.2f),
-                    0.3f + sinf(seed) * 0.3f);
+                // Vary size -- smaller near surface, bigger as they erupt
+                float flameSize = starSize * (0.06f + eruptDist * 0.2f);
+                if (fi % 8 == 0) flameSize *= 1.5f; // Flares are bigger
+
+                // Color: hot white near surface -> orange -> red as they fly out
+                float heatMix = 1.0f - eruptDist;
+                glm::vec3 flameColor = glm::mix(
+                    glm::vec3(1.0f, 0.4f, 0.1f), // outer: orange-red
+                    glm::vec3(1.0f, 0.95f, 0.8f), // inner: hot white
+                    heatMix * 0.7f
+                );
+
+                float flameAlpha = 0.06f + eruptDist * 0.06f;
+                flameAlpha *= (1.0f - lifecycle * 0.5f); // fade at end of life
 
                 app.billboard.draw(flamePos, glm::vec4(flameColor, flameAlpha), flameSize);
             }
@@ -985,8 +1003,8 @@ void renderScene(App& app) {
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-            // Track moons -- show ALL moons for ALL albums at once
-            {
+            // Track moons -- only show when this album is selected
+            if (ai == app.selectedAlbum) {
                 app.ringShader.use();
                 app.ringShader.setMat4("uView", glm::value_ptr(view));
                 app.ringShader.setMat4("uProjection", glm::value_ptr(proj));
@@ -1622,6 +1640,7 @@ void handleEvents(App& app) {
                     // Try planets/moons first
                     HitResult pmHit = hitTestPlanetMoon(app, mx, my);
                     if (pmHit.track >= 0 && pmHit.album >= 0) {
+                        // Clicked a track moon -- play it and zoom to it
                         auto& star = app.artistNodes[app.selectedArtist];
                         auto& album = star.albumOrbits[pmHit.album];
                         auto& track = album.tracks[pmHit.track];
@@ -1629,9 +1648,32 @@ void handleEvents(App& app) {
                         app.playingArtist = app.selectedArtist;
                         app.playingAlbum = pmHit.album;
                         app.playingTrack = pmHit.track;
+                        app.currentLevel = G_TRACK_LEVEL;
+                        // Zoom camera close to the moon
+                        float a = album.angle + app.elapsedTime * album.speed;
+                        glm::vec3 apos = star.pos + glm::vec3(cosf(a)*album.radius, 0, sinf(a)*album.radius);
+                        float ta = track.angle + app.elapsedTime * track.speed;
+                        glm::vec3 mpos = apos + glm::vec3(cosf(ta)*track.radius, 0, sinf(ta)*track.radius);
+                        app.camera.flyTo(mpos, track.radius * 4.0f + 0.5f);
                     } else if (pmHit.album >= 0) {
+                        // Clicked an album planet -- select and zoom to it
                         app.selectedAlbum = (app.selectedAlbum == pmHit.album) ? -1 : pmHit.album;
                         app.currentLevel = (app.selectedAlbum >= 0) ? G_ALBUM_LEVEL : G_ARTIST_LEVEL;
+                        // Zoom camera to the planet
+                        if (app.selectedAlbum >= 0) {
+                            auto& star = app.artistNodes[app.selectedArtist];
+                            auto& album = star.albumOrbits[app.selectedAlbum];
+                            float a = album.angle + app.elapsedTime * album.speed;
+                            glm::vec3 apos = star.pos + glm::vec3(cosf(a)*album.radius, 0, sinf(a)*album.radius);
+                            // Zoom close enough to see track moons
+                            float outerTrack = album.tracks.empty() ? album.planetSize * 5.0f :
+                                album.tracks.back().radius * 2.5f;
+                            app.camera.flyTo(apos, std::max(outerTrack, 2.0f));
+                        } else {
+                            // Deselected album, zoom back to star
+                            auto& star = app.artistNodes[app.selectedArtist];
+                            app.camera.flyTo(star.pos, star.idealCameraDist);
+                        }
                     } else {
                         int hit = hitTestStar(app, mx, my);
                         if (hit >= 0) {
