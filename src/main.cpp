@@ -827,35 +827,30 @@ void renderScene(App& app) {
             float starSize = n.radius * 0.35f;
 
             // Star sphere with starCore texture - the MAIN bright element
+            // Star sphere -- texture VISIBLE (flames, surface detail)
             glBindTexture(GL_TEXTURE_2D, app.texStarCore);
             glm::mat4 m = glm::translate(glm::mat4(1.0f), n.pos);
-            m = glm::rotate(m, app.elapsedTime * 0.3f, glm::vec3(0,1,0));
+            m = glm::rotate(m, app.elapsedTime * 0.12f, glm::vec3(0.1f, 1, 0.05f));
             m = glm::scale(m, glm::vec3(starSize));
             app.planetShader.setMat4("uModel", glm::value_ptr(m));
-            glm::vec3 hotColor = glm::mix(n.color, glm::vec3(1.0f), 0.7f);
-            app.planetShader.setVec3("uColor", hotColor.r, hotColor.g, hotColor.b);
-            app.planetShader.setVec3("uEmissive", 1.0f, 0.97f, 0.9f);
-            app.planetShader.setFloat("uEmissiveStrength", 1.2f);
+            // Let texture detail show -- moderate color, LOW emissive
+            glm::vec3 warmTint = glm::mix(n.color, glm::vec3(1.0f, 0.85f, 0.6f), 0.5f);
+            app.planetShader.setVec3("uColor", warmTint.r, warmTint.g, warmTint.b);
+            app.planetShader.setVec3("uEmissive", warmTint.r * 0.3f, warmTint.g * 0.25f, warmTint.b * 0.2f);
+            app.planetShader.setFloat("uEmissiveStrength", 0.5f);
+            app.planetShader.setVec3("uLightPos", n.pos.x, n.pos.y + 5.0f, n.pos.z + 3.0f);
             app.sphereHi.draw();
 
-            // Tight glow layers -- small and contained
+            // Tight warm corona -- just barely bigger than the sphere
             glDepthMask(GL_FALSE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);
             app.billboardShader.use();
             app.billboardShader.setMat4("uView", glm::value_ptr(view));
             app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
-
-            // Very tight glow -- just a halo around the sphere
             glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-            app.billboard.draw(n.pos, glm::vec4(1.0f, 0.98f, 0.9f, 0.25f), starSize * 2.5f);
-
-            // Subtle colored corona
-            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.4f, 0.05f), starSize * 4.5f);
-
-            // Lens flare -- very subtle rays
-            glBindTexture(GL_TEXTURE_2D, app.texLensFlare);
-            float flarePulse = 1.0f + sinf(app.elapsedTime * 0.8f) * 0.03f;
-            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.3f + glm::vec3(0.15f), 0.04f), starSize * 6.0f * flarePulse);
+            app.billboard.draw(n.pos, glm::vec4(warmTint * 0.7f, 0.12f), starSize * 2.0f);
+            // Faint outer halo
+            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.2f, 0.02f), starSize * 3.0f);
 
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -928,8 +923,8 @@ void renderScene(App& app) {
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-            // Track moons for selected album
-            if (ai == app.selectedAlbum) {
+            // Track moons -- show ALL moons for ALL albums at once
+            {
                 app.ringShader.use();
                 app.ringShader.setMat4("uView", glm::value_ptr(view));
                 app.ringShader.setMat4("uProjection", glm::value_ptr(proj));
@@ -1247,8 +1242,31 @@ void renderUI(App& app) {
     // Search
     if (app.artistNodes.size() > 0) {
         static char searchBuf[256] = "";
-        ImGui::SetNextItemWidth(320);
-        ImGui::InputTextWithHint("##search", "Search artists...", searchBuf, sizeof(searchBuf));
+        ImGui::SetNextItemWidth(290);
+        if (ImGui::InputTextWithHint("##search", "Search artists...", searchBuf, sizeof(searchBuf),
+                ImGuiInputTextFlags_AutoSelectAll)) {
+            // Search changed -- fly to first matching artist
+            app.searchQuery = searchBuf;
+            if (strlen(searchBuf) > 0) {
+                std::string q = searchBuf;
+                std::transform(q.begin(), q.end(), q.begin(), ::tolower);
+                for (int i = 0; i < (int)app.artistNodes.size(); i++) {
+                    std::string lower = app.artistNodes[i].name;
+                    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                    if (lower.find(q) != std::string::npos) {
+                        // Select and fly to this artist
+                        if (app.selectedArtist >= 0) app.artistNodes[app.selectedArtist].isSelected = false;
+                        app.selectedArtist = i;
+                        app.selectedAlbum = -1;
+                        app.artistNodes[i].isSelected = true;
+                        app.currentLevel = G_ARTIST_LEVEL;
+                        app.camera.autoRotate = false;
+                        app.camera.flyTo(app.artistNodes[i].pos, app.artistNodes[i].idealCameraDist);
+                        break;
+                    }
+                }
+            }
+        }
         app.searchQuery = searchBuf;
     }
 
