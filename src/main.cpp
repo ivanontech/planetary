@@ -1083,10 +1083,12 @@ void renderScene(App& app) {
             m = glm::rotate(m, app.elapsedTime * 0.1f, glm::vec3(0.05f, 1, 0));
             m = glm::scale(m, glm::vec3(coreSize));
             app.starShader.setMat4("uModel", glm::value_ptr(m));
-            glm::vec3 starColor = glm::mix(n.color, glm::vec3(1.0f, 0.97f, 0.92f), 0.5f);
+            // Each star gets a UNIQUE color mix based on artist
+            glm::vec3 starColor = glm::mix(n.color, glm::vec3(1.0f, 0.95f, 0.85f), 0.35f);
             app.starShader.setVec3("uColor", starColor.r, starColor.g, starColor.b);
-            app.starShader.setVec3("uEmissive", starColor.r * 0.8f, starColor.g * 0.7f, starColor.b * 0.5f);
-            app.starShader.setFloat("uEmissiveStrength", 0.7f + app.audioWave * 0.4f);
+            // Pass artist hue to shader for unique plasma palette
+            app.starShader.setVec3("uEmissive", n.color.r * 0.6f, n.color.g * 0.5f, n.color.b * 0.4f);
+            app.starShader.setFloat("uEmissiveStrength", 0.6f + app.audioWave * 0.5f);
             app.sphereHi.draw();
             // Switch back to planet shader for rest of scene
             app.planetShader.use();
@@ -1153,38 +1155,89 @@ void renderScene(App& app) {
                     }
                 }
                 
-                // NEBULA GAS EMISSIONS -- large colored clouds driven by bass
-                glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-                // Multiple nebula colors based on star + random
+                // === NEBULA GAS + GRAVITY LOOPS + WAVELENGTHS ===
+                
+                // Nebula gas clouds -- 8 unique colors
                 glm::vec3 nebColors[] = {
-                    glm::mix(starColor, glm::vec3(0.2f, 0.4f, 1.0f), 0.6f),  // Blue
-                    glm::mix(starColor, glm::vec3(0.8f, 0.2f, 0.5f), 0.5f),  // Magenta
-                    glm::mix(starColor, glm::vec3(1.0f, 0.5f, 0.1f), 0.4f),  // Orange
-                    glm::mix(starColor, glm::vec3(0.3f, 0.8f, 0.6f), 0.5f),  // Teal
-                    glm::mix(starColor, glm::vec3(0.6f, 0.2f, 0.8f), 0.5f),  // Purple
-                    glm::vec3(1.0f, 0.7f, 0.3f),                              // Gold
-                    glm::vec3(0.3f, 0.6f, 1.0f),                              // Bright blue
-                    glm::vec3(0.8f, 0.3f, 0.3f),                              // Warm red
+                    glm::mix(n.color, glm::vec3(0.2f, 0.4f, 1.0f), 0.7f),
+                    glm::mix(n.color, glm::vec3(0.9f, 0.15f, 0.5f), 0.6f),
+                    glm::mix(n.color, glm::vec3(1.0f, 0.5f, 0.05f), 0.5f),
+                    glm::mix(n.color, glm::vec3(0.2f, 0.9f, 0.7f), 0.6f),
+                    glm::mix(n.color, glm::vec3(0.7f, 0.15f, 0.9f), 0.6f),
+                    glm::vec3(1.0f, 0.8f, 0.3f),
+                    glm::vec3(0.3f, 0.7f, 1.0f),
+                    glm::vec3(0.9f, 0.25f, 0.25f),
                 };
-                int numGas = 12;
-                for (int gi = 0; gi < numGas; gi++) {
-                    float ga = app.elapsedTime * (0.03f + gi * 0.008f) + (float)gi * 0.524f;
-                    float bassForce = app.audioBass * 1.5f;
-                    float gasR = coreSize * (1.5f + sinf(ga * 2.3f + gi) * 0.5f + bassForce * 1.0f);
-                    float gasY = sinf(ga * 0.7f + gi * 1.2f) * gasR * 0.4f;
-                    glm::vec3 gpos = n.pos + glm::vec3(cosf(ga)*gasR, gasY, sinf(ga)*gasR);
+                
+                glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
+                // Gas jets -- shoot outward with bass
+                for (int gi = 0; gi < 16; gi++) {
+                    float ga = app.elapsedTime * (0.02f + gi * 0.006f) + (float)gi * 0.393f;
+                    float bassF = app.audioBass * 2.0f;
+                    float gasR = coreSize * (1.4f + sinf(ga * 1.8f + gi) * 0.6f + bassF * 1.2f);
+                    float gasY = sinf(ga * 0.5f + gi * 1.3f) * gasR * 0.5f;
+                    glm::vec3 gp = n.pos + glm::vec3(cosf(ga)*gasR, gasY, sinf(ga)*gasR);
+                    float gs = coreSize * (0.3f + app.audioBass * 0.5f);
+                    glm::vec3 gc = nebColors[gi % 8];
+                    float ga2 = 0.025f + app.audioWave * 0.025f;
+                    app.billboard.draw(gp, glm::vec4(gc, ga2), gs);
+                    // Trailing wisps
+                    glm::vec3 gp2 = gp + glm::vec3(sinf(ga)*coreSize*0.4f, coreSize*0.15f, cosf(ga)*coreSize*0.3f);
+                    app.billboard.draw(gp2, glm::vec4(gc * 0.6f, ga2 * 0.5f), gs * 0.6f);
+                }
+                
+                // GRAVITY LOOPS -- figure-8 / loop patterns driven by audio
+                glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
+                for (int li = 0; li < 4; li++) {
+                    float loopPhase = app.elapsedTime * 0.15f + (float)li * 1.571f;
+                    float loopR = coreSize * (2.5f + app.audioBass * 2.0f + li * 0.5f);
+                    int loopSegs = 40;
+                    std::vector<float> loopVerts;
+                    for (int s = 0; s <= loopSegs; s++) {
+                        float t = (float)s / (float)loopSegs * 2.0f * (float)M_PI;
+                        // Figure-8 / lemniscate-like path
+                        float r = loopR * (0.8f + 0.3f * sinf(t * 2.0f + loopPhase));
+                        float x = cosf(t + loopPhase) * r;
+                        float y = sinf(t * 2.0f + loopPhase * 0.7f) * loopR * 0.3f;
+                        float z = sinf(t + loopPhase) * r;
+                        loopVerts.push_back(n.pos.x + x);
+                        loopVerts.push_back(n.pos.y + y);
+                        loopVerts.push_back(n.pos.z + z);
+                    }
+                    GLuint lvao, lvbo;
+                    glGenVertexArrays(1, &lvao); glGenBuffers(1, &lvbo);
+                    glBindVertexArray(lvao); glBindBuffer(GL_ARRAY_BUFFER, lvbo);
+                    glBufferData(GL_ARRAY_BUFFER, loopVerts.size()*sizeof(float), loopVerts.data(), GL_STREAM_DRAW);
+                    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3*sizeof(float), 0);
+                    glEnableVertexAttribArray(0);
+                    app.ringShader.use();
+                    app.ringShader.setMat4("uView", glm::value_ptr(view));
+                    app.ringShader.setMat4("uProjection", glm::value_ptr(proj));
+                    glm::mat4 id(1.0f);
+                    app.ringShader.setMat4("uModel", glm::value_ptr(id));
+                    glm::vec3 lc = nebColors[li * 2];
+                    float la = 0.06f + app.audioWave * 0.04f;
+                    app.ringShader.setVec4("uColor", lc.r, lc.g, lc.b, la);
+                    glLineWidth(1.5f);
+                    glDrawArrays(GL_LINE_STRIP, 0, loopSegs + 1);
+                    glLineWidth(1.0f);
+                    glDeleteBuffers(1, &lvbo); glDeleteVertexArrays(1, &lvao);
                     
-                    // Size pulses with bass
-                    float gsize = coreSize * (0.4f + app.audioBass * 0.4f + sinf(ga * 1.5f) * 0.1f);
-                    
-                    glm::vec3 gcol = nebColors[gi % 8];
-                    float galpha = 0.02f + app.audioWave * 0.02f + app.audioBass * 0.01f;
-                    
-                    app.billboard.draw(gpos, glm::vec4(gcol, galpha), gsize);
-                    
-                    // Second layer slightly offset for depth
-                    glm::vec3 gpos2 = gpos + glm::vec3(sinf(ga)*coreSize*0.3f, coreSize*0.1f, cosf(ga)*coreSize*0.2f);
-                    app.billboard.draw(gpos2, glm::vec4(gcol * 0.7f, galpha * 0.6f), gsize * 0.7f);
+                    // Restore billboard shader for next effects
+                    app.billboardShader.use();
+                    app.billboardShader.setMat4("uView", glm::value_ptr(view));
+                    app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
+                    glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
+                }
+                
+                // AUDIO WAVELENGTH RINGS -- expanding rings with frequency
+                glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
+                for (int w = 0; w < 5; w++) {
+                    float wt = fmodf(app.elapsedTime * 0.4f + (float)w * 0.6f, 3.0f) / 3.0f;
+                    float wr = coreSize * (1.5f + wt * 20.0f * (0.5f + app.audioBass * 0.5f));
+                    float wa = (1.0f - wt) * 0.03f * (0.3f + app.audioWave * 0.7f);
+                    glm::vec3 wc = nebColors[(w + 3) % 8];
+                    app.billboard.draw(n.pos, glm::vec4(wc, wa), wr);
                 }
             }
             glDepthMask(GL_TRUE);
