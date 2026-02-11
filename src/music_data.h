@@ -47,6 +47,7 @@ struct AlbumData {
 
 struct ArtistData {
     std::string name;
+    std::string primaryGenre; // Most common genre across tracks
     std::vector<AlbumData> albums;
     int totalTracks = 0;
 };
@@ -191,6 +192,18 @@ inline MusicLibrary scanMusicLibrary(const std::string& dirPath,
             artist.totalTracks += (int)albumData.tracks.size();
             lib.totalAlbums++;
         }
+        // Determine primary genre from most common genre across tracks
+        std::map<std::string, int> genreCounts;
+        for (auto& album : artist.albums)
+            for (auto& t : album.tracks)
+                if (!t.genre.empty() && t.genre != "Unknown") genreCounts[t.genre]++;
+        if (!genreCounts.empty()) {
+            artist.primaryGenre = std::max_element(genreCounts.begin(), genreCounts.end(),
+                [](auto& a, auto& b) { return a.second < b.second; })->first;
+        } else {
+            artist.primaryGenre = "Unknown";
+        }
+
         // Extract cover art for each album (from first track)
         for (auto& album : artist.albums) {
             if (album.coverArtData.empty() && !album.tracks.empty()) {

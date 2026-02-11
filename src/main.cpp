@@ -113,6 +113,7 @@ struct ArtistNode {
             std::string name;
             std::string filePath;
             float duration;
+            float tiltX, tiltZ;  // Unique orbital plane tilt
         };
         std::vector<TrackOrbit> tracks;
     };
@@ -157,18 +158,37 @@ void computeArtistColor(ArtistNode& node) {
 // ============================================================
 // STAR POSITIONING - from NodeArtist.cpp setData()
 // ============================================================
-void computeArtistPosition(ArtistNode& node, int total) {
+// Genre -> angular sector mapping for spatial clustering
+static std::map<std::string, float> g_genreAngles;
+static float g_nextGenreAngle = 0;
+
+float getGenreAngle(const std::string& genre) {
+    auto it = g_genreAngles.find(genre);
+    if (it != g_genreAngles.end()) return it->second;
+    float a = g_nextGenreAngle;
+    g_nextGenreAngle += 0.618f * 2.0f * M_PI; // golden angle separation
+    g_genreAngles[genre] = a;
+    return a;
+}
+
+void computeArtistPosition(ArtistNode& node, int total, const std::string& genre) {
     std::hash<std::string> hasher;
     size_t h = hasher(node.name);
     float hashPer = (float)(h % 9000L) / 90.0f + 10.0f;
-    // Spread stars apart with 3D depth -- NOT flat on one plane
     float spreadFactor = 3.0f;
     hashPer *= spreadFactor;
-    float angle = (float)node.index * 0.618f;
-    // Use a second hash for vertical position -- real 3D distribution
+
+    // Base angle from genre cluster + offset from name hash
+    float genreBase = getGenreAngle(genre);
+    float nameOffset = (float)(h % 628) / 100.0f; // 0 to ~6.28 (full circle)
+    float genreSpread = 0.8f; // How tight the cluster is (radians)
+    float angle = genreBase + nameOffset * genreSpread;
+
+    // Vertical from second hash
     size_t h2 = hasher(node.name + "_y");
     float yHash = ((float)(h2 % 10000) / 10000.0f - 0.5f) * 2.0f;
-    float height = yHash * hashPer * 0.4f; // Spread vertically too
+    float height = yHash * hashPer * 0.35f;
+
     node.pos = glm::vec3(cosf(angle) * hashPer, height, sinf(angle) * hashPer);
 }
 
@@ -204,6 +224,11 @@ void computeAlbumOrbits(ArtistNode& node, const ArtistData& artistData, int arti
             to.angle = (float)ti * 2.396f;
             to.speed = (2.0f * (float)M_PI) / std::max(to.duration, 30.0f);
             to.size = moonSize;
+            // Unique orbital tilt per moon -- 3D orbits not flat
+            std::hash<std::string> th;
+            size_t trackHash = th(to.name + std::to_string(ti));
+            to.tiltX = ((float)(trackHash % 1000) / 1000.0f - 0.5f) * 0.5f;
+            to.tiltZ = ((float)((trackHash >> 10) % 1000) / 1000.0f - 0.5f) * 0.4f;
             trackOrbitR += moonSize * 2.0f;
             orbit.tracks.push_back(to);
         }
@@ -698,7 +723,7 @@ void buildScene(App& app) {
         node.name = app.library.artists[i].name;
         node.totalTracks = app.library.artists[i].totalTracks;
         computeArtistColor(node);
-        computeArtistPosition(node, total);
+        computeArtistPosition(node, total, app.library.artists[i].primaryGenre);
         computeAlbumOrbits(node, app.library.artists[i], i);
         node.glowRadius = node.radiusInit * (0.8f + std::min(node.totalTracks / 30.0f, 1.0f) * 1.2f);
         app.artistNodes.push_back(node);
@@ -745,11 +770,28 @@ void buildScene(App& app) {
 // RENDERING
 // ============================================================
 // Project 3D position to screen coords for text labels
+// ALL CAPS conversion
+std::string toUpper(const std::string& s) {
+    std::string r = s;
+    std::transform(r.begin(), r.end(), r.begin(), ::toupper);
+    return r;
+}
+
 glm::vec2 worldToScreen(const glm::mat4& vp, glm::vec3 pos, int w, int h) {
     glm::vec4 clip = vp * glm::vec4(pos, 1.0f);
     if (clip.w <= 0.01f) return glm::vec2(-1000, -1000);
     glm::vec3 ndc = glm::vec3(clip) / clip.w;
     return glm::vec2((ndc.x * 0.5f + 0.5f) * w, (1.0f - (ndc.y * 0.5f + 0.5f)) * h);
+}
+
+// Helper: compute moon position with tilted orbit
+glm::vec3 getMoonPos(glm::vec3 center, float radius, float angle, float tiltX, float tiltZ) {
+    float x = cosf(angle) * radius;
+    float z = sinf(angle) * radius;
+    float y = x * sinf(tiltX) + z * sinf(tiltZ); // tilt the orbit plane
+    x *= cosf(tiltX);
+    z *= cosf(tiltZ);
+    return center + glm::vec3(x, y, z);
 }
 
 void renderScene(App& app) {
@@ -1012,7 +1054,7 @@ void renderScene(App& app) {
                 for (int ti = 0; ti < (int)o.tracks.size(); ti++) {
                     auto& t = o.tracks[ti];
                     float ta = t.angle + app.elapsedTime * t.speed;
-                    glm::vec3 mp = apos + glm::vec3(cosf(ta)*t.radius, 0, sinf(ta)*t.radius);
+                    glm::vec3 mp = getMoonPos(apos, t.radius, ta, t.tiltX, t.tiltZ);
                     glm::mat4 mm = glm::translate(glm::mat4(1.0f), mp);
                     mm = glm::scale(mm, glm::vec3(t.size));
                     app.planetShader.setMat4("uModel", glm::value_ptr(mm));
@@ -1040,9 +1082,10 @@ void renderScene(App& app) {
                         for (int s = 0; s <= segments; s++) {
                             float frac = (float)s / 80.0f;
                             float a = frac * 2.0f * (float)M_PI;
-                            trailVerts.push_back(apos.x + cosf(a) * t.radius);
-                            trailVerts.push_back(apos.y + 0.01f);
-                            trailVerts.push_back(apos.z + sinf(a) * t.radius);
+                            glm::vec3 tp = getMoonPos(apos, t.radius, a, t.tiltX, t.tiltZ);
+                            trailVerts.push_back(tp.x);
+                            trailVerts.push_back(tp.y + 0.01f);
+                            trailVerts.push_back(tp.z);
                         }
                         GLuint trailVAO, trailVBO;
                         glGenVertexArrays(1, &trailVAO);
@@ -1230,7 +1273,8 @@ void renderLabels(App& app) {
         ImU32 col = ImGui::ColorConvertFloat4ToU32(ImVec4(1.0f, 1.0f, 1.0f, alpha * 0.9f));
         ImU32 shadow = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, alpha * 0.7f));
 
-        const char* name = n.name.c_str();
+        std::string upperName = toUpper(n.name);
+        const char* name = upperName.c_str();
         ImVec2 textSize = ImGui::CalcTextSize(name);
         ImVec2 pos(sp.x - textSize.x * 0.5f, sp.y - textSize.y - 4);
 
@@ -1255,25 +1299,27 @@ void renderLabels(App& app) {
             ImU32 col = ImGui::ColorConvertFloat4ToU32(ImVec4(1.0f, 1.0f, 1.0f, alpha));
             ImU32 shadow = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, alpha * 0.6f));
 
-            ImVec2 ts = ImGui::CalcTextSize(o.name.c_str());
+            std::string albumUpper = toUpper(o.name);
+            ImVec2 ts = ImGui::CalcTextSize(albumUpper.c_str());
             ImVec2 pos(sp.x - ts.x * 0.5f, sp.y - ts.y);
-            dl->AddText(ImVec2(pos.x + 1, pos.y + 1), shadow, o.name.c_str());
-            dl->AddText(pos, col, o.name.c_str());
+            dl->AddText(ImVec2(pos.x + 1, pos.y + 1), shadow, albumUpper.c_str());
+            dl->AddText(pos, col, albumUpper.c_str());
 
             // Track moon labels for selected album
             if (ai == app.selectedAlbum) {
                 for (auto& t : o.tracks) {
                     float ta = t.angle + app.elapsedTime * t.speed;
-                    glm::vec3 mp = apos + glm::vec3(cosf(ta)*t.radius, 0, sinf(ta)*t.radius);
+                    glm::vec3 mp = getMoonPos(apos, t.radius, ta, t.tiltX, t.tiltZ);
                     glm::vec2 msp = worldToScreen(vp, mp + glm::vec3(0, t.size * 2.0f, 0), app.screenW, app.screenH);
                     if (msp.x < 0 || msp.x > app.screenW) continue;
 
                     ImU32 tc = ImGui::ColorConvertFloat4ToU32(ImVec4(0.9f, 0.9f, 0.95f, 0.7f));
                     ImU32 ts2 = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, 0.5f));
-                    ImVec2 tts = ImGui::CalcTextSize(t.name.c_str());
+                    std::string trackUpper = toUpper(t.name);
+                    ImVec2 tts = ImGui::CalcTextSize(trackUpper.c_str());
                     ImVec2 tp(msp.x - tts.x * 0.5f, msp.y - tts.y);
-                    dl->AddText(ImVec2(tp.x + 1, tp.y + 1), ts2, t.name.c_str());
-                    dl->AddText(tp, tc, t.name.c_str());
+                    dl->AddText(ImVec2(tp.x + 1, tp.y + 1), ts2, trackUpper.c_str());
+                    dl->AddText(tp, tc, trackUpper.c_str());
                 }
             }
         }
@@ -1590,7 +1636,7 @@ HitResult hitTestPlanetMoon(App& app, int mx, int my) {
             for (int ti = 0; ti < (int)o.tracks.size(); ti++) {
                 auto& t = o.tracks[ti];
                 float ta = t.angle + app.elapsedTime * t.speed;
-                glm::vec3 mp = apos + glm::vec3(cosf(ta)*t.radius, 0, sinf(ta)*t.radius);
+                glm::vec3 mp = getMoonPos(apos, t.radius, ta, t.tiltX, t.tiltZ);
                 glm::vec2 msp = worldToScreen(vp, mp, app.screenW, app.screenH);
                 float md = sqrtf((msp.x-mx)*(msp.x-mx) + (msp.y-my)*(msp.y-my));
                 float mhitR = std::max(20.0f, t.size * 120.0f);
