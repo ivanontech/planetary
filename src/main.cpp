@@ -225,7 +225,7 @@ void computeAlbumOrbits(ArtistNode& node, const ArtistData& artistData, int arti
             to.angle = (float)ti * 2.396f;
             // Orbit speed: shorter tracks orbit FASTER (but all visibly move)
             // Scale so even a 5-min track completes an orbit in ~20 seconds
-            to.speed = (2.0f * (float)M_PI) / (std::max(to.duration, 30.0f) * 0.08f);
+            to.speed = (2.0f * (float)M_PI) / (std::max(to.duration, 30.0f) * 0.5f);
             to.size = moonSize;
             // Unique orbital tilt per moon -- 3D orbits not flat
             std::hash<std::string> th;
@@ -497,7 +497,7 @@ struct App {
     std::string searchQuery;
 
     // Rendering
-    Shader starPointShader, billboardShader, planetShader, ringShader;
+    Shader starPointShader, billboardShader, planetShader, ringShader, starShader;
     Shader bloomBrightShader, bloomBlurShader, bloomCompositeShader;
     GLuint texStarGlow=0, texAtmosphere=0, texStar=0, texSurface=0, texSkydome=0;
     GLuint texLensFlare=0, texStarCore=0, texEclipseGlow=0, texParticle=0;
@@ -763,6 +763,7 @@ bool initResources(App& app) {
     if (!app.billboardShader.load(resolvePath("shaders/billboard.vert"), resolvePath("shaders/billboard.frag"))) return false;
     if (!app.planetShader.load(resolvePath("shaders/planet.vert"), resolvePath("shaders/planet.frag"))) return false;
     if (!app.ringShader.load(resolvePath("shaders/orbit_ring.vert"), resolvePath("shaders/orbit_ring.frag"))) return false;
+    if (!app.starShader.load(resolvePath("shaders/star.vert"), resolvePath("shaders/star.frag"))) return false;
     if (!app.bloomBrightShader.load(resolvePath("shaders/fullscreen.vert"), resolvePath("shaders/bloom_bright.frag"))) return false;
     if (!app.bloomBlurShader.load(resolvePath("shaders/fullscreen.vert"), resolvePath("shaders/bloom_blur.frag"))) return false;
     if (!app.bloomCompositeShader.load(resolvePath("shaders/fullscreen.vert"), resolvePath("shaders/bloom_composite.frag"))) return false;
@@ -926,10 +927,10 @@ void renderScene(App& app) {
         // Seed-based nebula clouds at fixed positions
         std::mt19937 nebRng(12345); // deterministic
         std::uniform_real_distribution<float> nebDist(-400.0f, 400.0f);
-        std::uniform_real_distribution<float> nebSize(30.0f, 120.0f);
+        std::uniform_real_distribution<float> nebSize(60.0f, 200.0f);
         std::uniform_real_distribution<float> nebHue(0.0f, 1.0f);
 
-        int numClouds = 40;
+        int numClouds = 80;
         for (int ci = 0; ci < numClouds; ci++) {
             glm::vec3 cpos(nebDist(nebRng), nebDist(nebRng) * 0.4f, nebDist(nebRng));
             float csize = nebSize(nebRng);
@@ -944,11 +945,11 @@ void renderScene(App& app) {
             else nebColor = glm::vec3(0.15f, 0.6f, 0.5f);                  // Teal
 
             // Very subtle -- just enough to tint the darkness
-            float nebAlpha = 0.008f + sinf(app.elapsedTime * 0.1f + ci * 0.5f) * 0.002f;
+            float nebAlpha = 0.02f + sinf(app.elapsedTime * 0.1f + ci * 0.5f) * 0.002f;
 
             // Audio reactivity -- nebulae glow slightly with music
             if (app.audio.playing) {
-                nebAlpha += app.audioWave * 0.003f;
+                nebAlpha += app.audioWave * 0.01f;
             }
 
             app.billboard.draw(cpos, glm::vec4(nebColor, nebAlpha), csize);
@@ -993,21 +994,27 @@ void renderScene(App& app) {
             float starSize = n.radius * 0.35f;
 
             // Star sphere with starCore texture - the MAIN bright element
-            // Star: BIG bright sphere + audio-reactive glow
-            float pulse = 1.0f + app.audioWave * 0.1f; // Pulse with music
-            float coreSize = starSize * 0.8f * pulse;  // BIGGER star
+            // Star: PROCEDURAL BURNING PLASMA surface
+            float pulse = 1.0f + app.audioWave * 0.1f;
+            float coreSize = starSize * 0.8f * pulse;
+            app.starShader.use();
+            app.starShader.setMat4("uView", glm::value_ptr(view));
+            app.starShader.setMat4("uProjection", glm::value_ptr(proj));
+            app.starShader.setFloat("uTime", app.elapsedTime);
             glBindTexture(GL_TEXTURE_2D, app.texStarCore);
             glm::mat4 m = glm::translate(glm::mat4(1.0f), n.pos);
-            m = glm::rotate(m, app.elapsedTime * 0.15f, glm::vec3(0.05f, 1, 0));
+            m = glm::rotate(m, app.elapsedTime * 0.1f, glm::vec3(0.05f, 1, 0));
             m = glm::scale(m, glm::vec3(coreSize));
-            app.planetShader.setMat4("uModel", glm::value_ptr(m));
-            glm::vec3 starColor = glm::mix(n.color, glm::vec3(1.0f, 0.97f, 0.92f), 0.7f);
-            // Very high emissive makes the sphere GLOW from within
-            app.planetShader.setVec3("uColor", starColor.r, starColor.g, starColor.b);
-            app.planetShader.setVec3("uEmissive", starColor.r, starColor.g * 0.95f, starColor.b * 0.9f);
-            app.planetShader.setFloat("uEmissiveStrength", 0.9f + app.audioWave * 0.3f);
-            app.planetShader.setVec3("uLightPos", n.pos.x, n.pos.y + 5.0f, n.pos.z);
+            app.starShader.setMat4("uModel", glm::value_ptr(m));
+            glm::vec3 starColor = glm::mix(n.color, glm::vec3(1.0f, 0.97f, 0.92f), 0.5f);
+            app.starShader.setVec3("uColor", starColor.r, starColor.g, starColor.b);
+            app.starShader.setVec3("uEmissive", starColor.r * 0.8f, starColor.g * 0.7f, starColor.b * 0.5f);
+            app.starShader.setFloat("uEmissiveStrength", 0.7f + app.audioWave * 0.4f);
             app.sphereHi.draw();
+            // Switch back to planet shader for rest of scene
+            app.planetShader.use();
+            app.planetShader.setMat4("uView", glm::value_ptr(view));
+            app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
 
             // Smooth glow halo -- pulses with audio
             glDepthMask(GL_FALSE);
@@ -1555,7 +1562,7 @@ void renderUI(App& app) {
         app.searchQuery = searchBuf;
 
         // Show clickable search results when searching
-        if (strlen(searchBuf) > 1 && app.selectedArtist < 0) {
+        if (strlen(searchBuf) > 1) {
             std::string q = searchBuf;
             std::transform(q.begin(), q.end(), q.begin(), ::tolower);
             int shown = 0;
