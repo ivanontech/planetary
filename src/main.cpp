@@ -491,6 +491,11 @@ struct App {
     bool mouseDown = false;
     int mouseButton = 0;
     bool imguiWantsMouse = false;
+    int mouseDragDist = 0;  // Accumulated drag pixels to distinguish click vs drag
+    int mouseDownX = 0, mouseDownY = 0;
+
+    // Currently playing track location (for trail rendering)
+    int playingArtist = -1, playingAlbum = -1, playingTrack = -1;
 
     // Loading state
     std::atomic<bool> libraryLoaded{false};
@@ -781,12 +786,12 @@ void renderScene(App& app) {
             // Inner hot glow
             app.billboard.draw(n.pos, glm::vec4(1.0f, 1.0f, 1.0f, 0.25f), sz * 0.3f);
         } else {
-            // Non-selected: small subtle glow, fade with distance
-            float maxDist = 600.0f;
+            // Non-selected: tiny subtle glow dot
+            float maxDist = 800.0f;
             float distFade = std::clamp(1.0f - (distToCam / maxDist), 0.0f, 1.0f);
             if (distFade < 0.01f) continue;
-            float sz = n.glowRadius * 3.0f;
-            float alpha = 0.15f * distFade;
+            float sz = n.glowRadius * 2.0f;
+            float alpha = 0.1f * distFade;
             app.billboard.draw(n.pos, glm::vec4(n.glowColor, alpha), sz);
         }
     }
@@ -924,17 +929,70 @@ void renderScene(App& app) {
                 app.planetShader.setMat4("uView", glm::value_ptr(view));
                 app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
                 glBindTexture(GL_TEXTURE_2D, app.texSurface);
-                for (auto& t : o.tracks) {
+                for (int ti = 0; ti < (int)o.tracks.size(); ti++) {
+                    auto& t = o.tracks[ti];
                     float ta = t.angle + app.elapsedTime * t.speed;
                     glm::vec3 mp = apos + glm::vec3(cosf(ta)*t.radius, 0, sinf(ta)*t.radius);
                     glm::mat4 mm = glm::translate(glm::mat4(1.0f), mp);
                     mm = glm::scale(mm, glm::vec3(t.size));
                     app.planetShader.setMat4("uModel", glm::value_ptr(mm));
                     app.planetShader.setVec3("uLightPos", star.pos.x, star.pos.y, star.pos.z);
-                    app.planetShader.setVec3("uColor", 0.6f, 0.6f, 0.65f);
-                    app.planetShader.setVec3("uEmissive", star.color.r * 0.1f, star.color.g * 0.1f, star.color.b * 0.1f);
-                    app.planetShader.setFloat("uEmissiveStrength", 0.1f);
+
+                    bool isPlayingTrack = (app.playingArtist == app.selectedArtist &&
+                        app.playingAlbum == ai && app.playingTrack == ti && app.audio.playing);
+                    if (isPlayingTrack) {
+                        // Playing track moon glows brighter
+                        app.planetShader.setVec3("uColor", 0.8f, 0.9f, 1.0f);
+                        app.planetShader.setVec3("uEmissive", BRIGHT_BLUE.r, BRIGHT_BLUE.g, BRIGHT_BLUE.b);
+                        app.planetShader.setFloat("uEmissiveStrength", 0.4f);
+                    } else {
+                        app.planetShader.setVec3("uColor", 0.6f, 0.6f, 0.65f);
+                        app.planetShader.setVec3("uEmissive", star.color.r * 0.1f, star.color.g * 0.1f, star.color.b * 0.1f);
+                        app.planetShader.setFloat("uEmissiveStrength", 0.1f);
+                    }
                     app.sphereMd.draw();
+
+                    // Playback trail -- cyan arc showing track progress
+                    if (isPlayingTrack) {
+                        float progress = app.audio.progress();
+                        int segments = std::max(4, (int)(progress * 80));
+                        std::vector<float> trailVerts;
+                        for (int s = 0; s <= segments; s++) {
+                            float frac = (float)s / 80.0f;
+                            float a = frac * 2.0f * (float)M_PI;
+                            trailVerts.push_back(apos.x + cosf(a) * t.radius);
+                            trailVerts.push_back(apos.y + 0.01f);
+                            trailVerts.push_back(apos.z + sinf(a) * t.radius);
+                        }
+                        GLuint trailVAO, trailVBO;
+                        glGenVertexArrays(1, &trailVAO);
+                        glGenBuffers(1, &trailVBO);
+                        glBindVertexArray(trailVAO);
+                        glBindBuffer(GL_ARRAY_BUFFER, trailVBO);
+                        glBufferData(GL_ARRAY_BUFFER, trailVerts.size()*sizeof(float), trailVerts.data(), GL_STREAM_DRAW);
+                        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3*sizeof(float), 0);
+                        glEnableVertexAttribArray(0);
+
+                        app.ringShader.use();
+                        app.ringShader.setMat4("uView", glm::value_ptr(view));
+                        app.ringShader.setMat4("uProjection", glm::value_ptr(proj));
+                        glm::mat4 identity(1.0f);
+                        app.ringShader.setMat4("uModel", glm::value_ptr(identity));
+                        app.ringShader.setVec4("uColor", BRIGHT_BLUE.r, BRIGHT_BLUE.g, BRIGHT_BLUE.b, 0.8f);
+                        glLineWidth(2.0f);
+                        glDrawArrays(GL_LINE_STRIP, 0, segments + 1);
+                        glLineWidth(1.0f);
+
+                        glDeleteBuffers(1, &trailVBO);
+                        glDeleteVertexArrays(1, &trailVAO);
+                        glBindVertexArray(0);
+
+                        // Restore planet shader
+                        app.planetShader.use();
+                        app.planetShader.setMat4("uView", glm::value_ptr(view));
+                        app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
+                        glBindTexture(GL_TEXTURE_2D, app.texSurface);
+                    }
                 }
             }
             app.planetShader.use();
@@ -1117,6 +1175,9 @@ void renderUI(App& app) {
 
                     if (ImGui::Selectable(label, isPlaying, 0, ImVec2(0, 22))) {
                         app.audio.play(track.filePath, track.name, star.name, album.name, track.duration);
+                        app.playingArtist = app.selectedArtist;
+                        app.playingAlbum = i;
+                        app.playingTrack = t;
                     }
 
                     // Duration on same line, right-aligned
@@ -1316,28 +1377,33 @@ void handleEvents(App& app) {
             break;
         case SDL_MOUSEBUTTONDOWN:
             if (!app.imguiWantsMouse) {
-                app.mouseDown = true; app.mouseButton = ev.button.button;
-                if (ev.button.button == SDL_BUTTON_LEFT) {
-                    // First try to hit planets/moons if we have a selected artist
-                    HitResult pmHit = hitTestPlanetMoon(app, ev.button.x, ev.button.y);
+                app.mouseDown = true;
+                app.mouseButton = ev.button.button;
+                app.mouseDragDist = 0;
+                app.mouseDownX = ev.button.x;
+                app.mouseDownY = ev.button.y;
+            }
+            break;
+        case SDL_MOUSEBUTTONUP:
+            if (!app.imguiWantsMouse && app.mouseDown) {
+                // Only treat as a CLICK if drag distance is small
+                if (app.mouseDragDist < 8 && app.mouseButton == SDL_BUTTON_LEFT) {
+                    int mx = ev.button.x, my = ev.button.y;
+                    // Try planets/moons first
+                    HitResult pmHit = hitTestPlanetMoon(app, mx, my);
                     if (pmHit.track >= 0 && pmHit.album >= 0) {
-                        // Clicked a track moon -- play it!
                         auto& star = app.artistNodes[app.selectedArtist];
                         auto& album = star.albumOrbits[pmHit.album];
                         auto& track = album.tracks[pmHit.track];
                         app.audio.play(track.filePath, track.name, star.name, album.name, track.duration);
+                        app.playingArtist = app.selectedArtist;
+                        app.playingAlbum = pmHit.album;
+                        app.playingTrack = pmHit.track;
                     } else if (pmHit.album >= 0) {
-                        // Clicked an album planet -- select/deselect it
-                        if (app.selectedAlbum == pmHit.album) {
-                            app.selectedAlbum = -1;
-                            app.currentLevel = G_ARTIST_LEVEL;
-                        } else {
-                            app.selectedAlbum = pmHit.album;
-                            app.currentLevel = G_ALBUM_LEVEL;
-                        }
+                        app.selectedAlbum = (app.selectedAlbum == pmHit.album) ? -1 : pmHit.album;
+                        app.currentLevel = (app.selectedAlbum >= 0) ? G_ALBUM_LEVEL : G_ARTIST_LEVEL;
                     } else {
-                        // Try to hit a star
-                        int hit = hitTestStar(app, ev.button.x, ev.button.y);
+                        int hit = hitTestStar(app, mx, my);
                         if (hit >= 0) {
                             if (app.selectedArtist >= 0) app.artistNodes[app.selectedArtist].isSelected = false;
                             if (hit == app.selectedArtist) {
@@ -1356,11 +1422,17 @@ void handleEvents(App& app) {
                     }
                 }
             }
+            app.mouseDown = false;
             break;
-        case SDL_MOUSEBUTTONUP: app.mouseDown = false; break;
         case SDL_MOUSEMOTION:
-            if (app.mouseDown && !app.imguiWantsMouse && app.mouseButton == SDL_BUTTON_RIGHT)
-                app.camera.onMouseDrag((float)ev.motion.xrel, (float)ev.motion.yrel);
+            if (app.mouseDown && !app.imguiWantsMouse) {
+                app.mouseDragDist += abs(ev.motion.xrel) + abs(ev.motion.yrel);
+                // LEFT or RIGHT click drag = orbit camera
+                if (app.mouseButton == SDL_BUTTON_LEFT || app.mouseButton == SDL_BUTTON_RIGHT) {
+                    app.camera.onMouseDrag((float)ev.motion.xrel, (float)ev.motion.yrel);
+                    app.camera.autoRotate = false;
+                }
+            }
             break;
         case SDL_MOUSEWHEEL:
             if (!app.imguiWantsMouse) app.camera.onMouseScroll((float)ev.wheel.y);
