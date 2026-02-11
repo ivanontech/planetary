@@ -841,16 +841,44 @@ void renderScene(App& app) {
             app.planetShader.setVec3("uLightPos", n.pos.x, n.pos.y + 5.0f, n.pos.z + 3.0f);
             app.sphereHi.draw();
 
-            // Tight warm corona -- just barely bigger than the sphere
+            // Minimal corona -- barely visible beyond the sphere
             glDepthMask(GL_FALSE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);
             app.billboardShader.use();
             app.billboardShader.setMat4("uView", glm::value_ptr(view));
             app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
             glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-            app.billboard.draw(n.pos, glm::vec4(warmTint * 0.7f, 0.12f), starSize * 2.0f);
-            // Faint outer halo
-            app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.2f, 0.02f), starSize * 3.0f);
+            // Tiny corona
+            app.billboard.draw(n.pos, glm::vec4(warmTint * 0.5f, 0.06f), starSize * 1.6f);
+
+            // FLAME PARTICLES flying off the star surface
+            glBindTexture(GL_TEXTURE_2D, app.texStar);
+            int numFlames = 30;
+            for (int fi = 0; fi < numFlames; fi++) {
+                float seed = (float)fi * 137.508f + n.hue * 100.0f; // golden angle per flame
+                float t = app.elapsedTime * (0.3f + (float)(fi % 5) * 0.15f) + seed;
+
+                // Flames orbit and fly outward from star surface
+                float orbitAngle = t * 0.8f;
+                float elevation = sinf(seed * 3.14f) * 0.6f;
+                float flameR = starSize * (1.1f + sinf(t * 2.0f + seed) * 0.15f +
+                    (float)(fi % 7) * 0.05f);
+                // Some flames shoot out further
+                if (fi % 5 == 0) flameR = starSize * (1.2f + sinf(t * 1.5f) * 0.4f);
+
+                glm::vec3 flamePos = n.pos + glm::vec3(
+                    cosf(orbitAngle) * cosf(elevation) * flameR,
+                    sinf(elevation) * flameR * 0.8f,
+                    sinf(orbitAngle) * cosf(elevation) * flameR
+                );
+
+                float flameAlpha = 0.08f + sinf(t * 3.0f + seed) * 0.04f;
+                float flameSize = starSize * (0.15f + (float)(fi % 4) * 0.05f);
+                glm::vec3 flameColor = glm::mix(warmTint, glm::vec3(1.0f, 0.6f, 0.2f),
+                    0.3f + sinf(seed) * 0.3f);
+
+                app.billboard.draw(flamePos, glm::vec4(flameColor, flameAlpha), flameSize);
+            }
 
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -900,14 +928,47 @@ void renderScene(App& app) {
             float angle = o.angle + app.elapsedTime * o.speed;
             glm::vec3 apos = star.pos + glm::vec3(cosf(angle)*o.radius, 0, sinf(angle)*o.radius);
 
+            // Each planet gets a UNIQUE color/tint based on album hash
+            std::hash<std::string> hasher;
+            size_t albumHash = hasher(o.name);
+            float planetHue = (float)(albumHash % 1000) / 1000.0f;
+            float planetSat = 0.3f + (float)((albumHash >> 10) % 100) / 200.0f;
+            // HSV to RGB for planet tint
+            float ph = planetHue * 6.0f;
+            int phi = (int)ph % 6;
+            float pf = ph - (int)ph;
+            float pp = 1.0f - planetSat;
+            float pq = 1.0f - planetSat * pf;
+            float pt = 1.0f - planetSat * (1.0f - pf);
+            glm::vec3 planetColor;
+            switch (phi) {
+                case 0: planetColor = {1, pt, pp}; break;
+                case 1: planetColor = {pq, 1, pp}; break;
+                case 2: planetColor = {pp, 1, pt}; break;
+                case 3: planetColor = {pp, pq, 1}; break;
+                case 4: planetColor = {pt, pp, 1}; break;
+                default: planetColor = {1, pp, pq}; break;
+            }
+            // Darken to look realistic in space
+            planetColor *= 0.6f;
+
+            // Unique axial tilt per planet
+            float tiltX = sinf((float)albumHash * 0.1f) * 0.3f;
+            float tiltZ = cosf((float)albumHash * 0.2f) * 0.2f;
+
+            // Use different surface texture region per planet
+            int texType = albumHash % 5; // 5 planet types from original
+
             glm::mat4 pm = glm::translate(glm::mat4(1.0f), apos);
-            pm = glm::rotate(pm, app.elapsedTime * 0.15f + (float)ai * 1.5f, glm::vec3(0.1f,1,0.05f));
+            pm = glm::rotate(pm, app.elapsedTime * 0.15f + (float)ai * 1.5f,
+                glm::vec3(tiltX, 1.0f, tiltZ));
             pm = glm::scale(pm, glm::vec3(o.planetSize));
             app.planetShader.setMat4("uModel", glm::value_ptr(pm));
-            // Planets are darker, lit by the star -- like the original
-            app.planetShader.setVec3("uColor", 0.7f, 0.7f, 0.7f);
+            app.planetShader.setVec3("uColor", planetColor.r, planetColor.g, planetColor.b);
             app.planetShader.setVec3("uLightPos", star.pos.x, star.pos.y, star.pos.z);
-            app.planetShader.setVec3("uEmissive", star.color.r * 0.15f, star.color.g * 0.15f, star.color.b * 0.15f);
+            // Subtle colored emissive per planet
+            app.planetShader.setVec3("uEmissive",
+                planetColor.r * 0.08f, planetColor.g * 0.08f, planetColor.b * 0.08f);
             app.planetShader.setFloat("uEmissiveStrength", ai == app.selectedAlbum ? 0.3f : 0.05f);
             app.sphereHi.draw();
 
@@ -918,8 +979,9 @@ void renderScene(App& app) {
             app.billboardShader.setMat4("uView", glm::value_ptr(view));
             app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
             glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
-            float atmoAlpha = (ai == app.selectedAlbum) ? 0.2f : 0.1f;
-            app.billboard.draw(apos, glm::vec4(star.glowColor * 0.4f, atmoAlpha), o.planetSize * 3.5f);
+            float atmoAlpha = (ai == app.selectedAlbum) ? 0.15f : 0.06f;
+            glm::vec3 atmoColor = glm::mix(planetColor, BRIGHT_BLUE, 0.3f);
+            app.billboard.draw(apos, glm::vec4(atmoColor, atmoAlpha), o.planetSize * 3.0f);
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
