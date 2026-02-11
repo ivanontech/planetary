@@ -462,11 +462,18 @@ struct App {
 
     // Rendering
     Shader starPointShader, billboardShader, planetShader, ringShader;
+    Shader bloomBrightShader, bloomBlurShader, bloomCompositeShader;
     GLuint texStarGlow=0, texAtmosphere=0, texStar=0, texSurface=0;
     BackgroundStars bgStars;
     BillboardQuad billboard;
     SphereMesh sphereHi, sphereMd, sphereLo;
     RingMesh unitRing;
+
+    // Bloom framebuffers
+    GLuint sceneFBO=0, sceneColor=0, sceneDepth=0;
+    GLuint bloomFBO[2]={0,0}, bloomColor[2]={0,0};
+    GLuint quadVAO=0, quadVBO=0;
+    int bloomW=0, bloomH=0;
 
     // Audio
     AudioPlayer audio;
@@ -553,30 +560,89 @@ bool initSDL(App& app) {
     return true;
 }
 
+void setupBloom(App& app) {
+    app.bloomW = app.screenW / 2;
+    app.bloomH = app.screenH / 2;
+
+    // Scene FBO (full res, HDR-ish)
+    if (app.sceneFBO) { glDeleteFramebuffers(1, &app.sceneFBO); glDeleteTextures(1, &app.sceneColor); glDeleteRenderbuffers(1, &app.sceneDepth); }
+    glGenFramebuffers(1, &app.sceneFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, app.sceneFBO);
+    glGenTextures(1, &app.sceneColor);
+    glBindTexture(GL_TEXTURE_2D, app.sceneColor);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, app.screenW, app.screenH, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, app.sceneColor, 0);
+    glGenRenderbuffers(1, &app.sceneDepth);
+    glBindRenderbuffer(GL_RENDERBUFFER, app.sceneDepth);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, app.screenW, app.screenH);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, app.sceneDepth);
+
+    // Bloom FBOs (half res, ping-pong)
+    for (int i = 0; i < 2; i++) {
+        if (app.bloomFBO[i]) { glDeleteFramebuffers(1, &app.bloomFBO[i]); glDeleteTextures(1, &app.bloomColor[i]); }
+        glGenFramebuffers(1, &app.bloomFBO[i]);
+        glBindFramebuffer(GL_FRAMEBUFFER, app.bloomFBO[i]);
+        glGenTextures(1, &app.bloomColor[i]);
+        glBindTexture(GL_TEXTURE_2D, app.bloomColor[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, app.bloomW, app.bloomH, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, app.bloomColor[i], 0);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // Fullscreen quad
+    if (!app.quadVAO) {
+        float qv[] = { -1,-1,0,0, 1,-1,1,0, 1,1,1,1, -1,-1,0,0, 1,1,1,1, -1,1,0,1 };
+        glGenVertexArrays(1, &app.quadVAO); glGenBuffers(1, &app.quadVBO);
+        glBindVertexArray(app.quadVAO); glBindBuffer(GL_ARRAY_BUFFER, app.quadVBO);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(qv), qv, GL_STATIC_DRAW);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), 0); glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)(2*sizeof(float))); glEnableVertexAttribArray(1);
+        glBindVertexArray(0);
+    }
+}
+
+void drawFullscreenQuad(App& app) {
+    glBindVertexArray(app.quadVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+}
+
 bool initResources(App& app) {
     if (!app.starPointShader.load(resolvePath("shaders/star_points.vert"), resolvePath("shaders/star_points.frag"))) return false;
     if (!app.billboardShader.load(resolvePath("shaders/billboard.vert"), resolvePath("shaders/billboard.frag"))) return false;
     if (!app.planetShader.load(resolvePath("shaders/planet.vert"), resolvePath("shaders/planet.frag"))) return false;
     if (!app.ringShader.load(resolvePath("shaders/orbit_ring.vert"), resolvePath("shaders/orbit_ring.frag"))) return false;
+    if (!app.bloomBrightShader.load(resolvePath("shaders/fullscreen.vert"), resolvePath("shaders/bloom_bright.frag"))) return false;
+    if (!app.bloomBlurShader.load(resolvePath("shaders/fullscreen.vert"), resolvePath("shaders/bloom_blur.frag"))) return false;
+    if (!app.bloomCompositeShader.load(resolvePath("shaders/fullscreen.vert"), resolvePath("shaders/bloom_composite.frag"))) return false;
 
     app.texStarGlow = loadTexture("resources/starGlow.png");
     app.texAtmosphere = loadTexture("resources/atmosphere.png");
     app.texStar = loadTexture("resources/star.png");
     app.texSurface = loadTexture("resources/surfacesLowRes.png");
 
-    app.bgStars.create(5000);
+    app.bgStars.create(8000);
     app.billboard.create();
-    app.sphereHi.create(32, 32);
-    app.sphereMd.create(16, 16);
-    app.sphereLo.create(8, 8);
+    app.sphereHi.create(48, 48);  // Higher quality spheres
+    app.sphereMd.create(24, 24);
+    app.sphereLo.create(12, 12);
     app.unitRing.create(1.0f, 128);
+
+    setupBloom(app);
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_PROGRAM_POINT_SIZE);
     glEnable(GL_MULTISAMPLE);
-    glClearColor(0.0f, 0.0f, 0.02f, 1.0f);
     return true;
 }
 
@@ -609,16 +675,22 @@ void buildScene(App& app) {
 // ============================================================
 // RENDERING
 // ============================================================
-void render(App& app) {
-    glClearColor(0.0f, 0.0f, 0.005f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+// Project 3D position to screen coords for text labels
+glm::vec2 worldToScreen(const glm::mat4& vp, glm::vec3 pos, int w, int h) {
+    glm::vec4 clip = vp * glm::vec4(pos, 1.0f);
+    if (clip.w <= 0.01f) return glm::vec2(-1000, -1000);
+    glm::vec3 ndc = glm::vec3(clip) / clip.w;
+    return glm::vec2((ndc.x * 0.5f + 0.5f) * w, (1.0f - (ndc.y * 0.5f + 0.5f)) * h);
+}
+
+void renderScene(App& app) {
     glm::mat4 view = app.camera.viewMatrix();
     glm::mat4 proj = app.camera.projMatrix();
 
-    // --- PASS 1: Background stars (point sprites, additive) ---
+    // --- Background stars ---
     glDepthMask(GL_FALSE);
     glDisable(GL_DEPTH_TEST);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE);  // Additive for glows on dark bg
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
     app.starPointShader.use();
     app.starPointShader.setMat4("uView", glm::value_ptr(view));
     app.starPointShader.setMat4("uProjection", glm::value_ptr(proj));
@@ -627,33 +699,28 @@ void render(App& app) {
     app.starPointShader.setInt("uTexture", 0);
     app.bgStars.draw();
 
-    // --- PASS 2: Star glows (billboards, additive) ---
-    // Scale opacity inversely with star count to prevent whiteout
+    // --- Star glows (additive billboards) ---
     app.billboardShader.use();
     app.billboardShader.setMat4("uView", glm::value_ptr(view));
     app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
     glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-
     float glowAlphaScale = std::min(1.0f, 30.0f / std::max((float)app.artistNodes.size(), 1.0f));
 
     for (auto& n : app.artistNodes) {
-        // Fade glows by distance from camera to avoid far-away glow buildup
         float distToCam = glm::length(n.pos - app.camera.position);
         float distFade = std::clamp(1.0f - (distToCam / 300.0f), 0.0f, 1.0f);
-        if (distFade < 0.01f && !n.isSelected) continue; // skip invisible glows
-
+        if (distFade < 0.01f && !n.isSelected) continue;
         float pulse = 1.0f + sinf(app.elapsedTime * 1.5f + (float)n.index) * 0.08f;
-        float sz = n.glowRadius * 8.0f * pulse * (n.isSelected ? 1.5f : 1.0f);
-        float alpha = (n.isSelected ? 0.5f : 0.08f * glowAlphaScale) * distFade;
-        app.billboard.draw(n.pos, glm::vec4(n.glowColor * 0.5f, alpha), sz);
+        float sz = n.glowRadius * 10.0f * pulse * (n.isSelected ? 1.5f : 1.0f);
+        float alpha = (n.isSelected ? 0.6f : 0.12f * glowAlphaScale) * distFade;
+        app.billboard.draw(n.pos, glm::vec4(n.glowColor, alpha), sz);
     }
 
-    // Reset blending for solid objects
     glDepthMask(GL_TRUE);
     glEnable(GL_DEPTH_TEST);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    // Star cores
+    // --- Star cores (emissive spheres) ---
     app.planetShader.use();
     app.planetShader.setMat4("uView", glm::value_ptr(view));
     app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
@@ -665,16 +732,19 @@ void render(App& app) {
         m = glm::rotate(m, app.elapsedTime * 0.5f, glm::vec3(0,1,0));
         m = glm::scale(m, glm::vec3(cs));
         app.planetShader.setMat4("uModel", glm::value_ptr(m));
-        app.planetShader.setVec3("uColor", n.color.r, n.color.g, n.color.b);
+        // Bright white-hot core with colored outer
+        glm::vec3 coreColor = glm::mix(n.color, glm::vec3(1.0f), 0.5f);
+        app.planetShader.setVec3("uColor", coreColor.r, coreColor.g, coreColor.b);
         app.planetShader.setVec3("uEmissive", n.color.r, n.color.g, n.color.b);
-        app.planetShader.setFloat("uEmissiveStrength", 0.3f);
+        app.planetShader.setFloat("uEmissiveStrength", 0.6f);
         app.sphereLo.draw();
     }
 
-    // Selected artist: orbit rings + planets
+    // --- Selected artist: orbit rings + album planets ---
     if (app.selectedArtist >= 0 && app.selectedArtist < (int)app.artistNodes.size()) {
         auto& star = app.artistNodes[app.selectedArtist];
 
+        // Orbit rings
         app.ringShader.use();
         app.ringShader.setMat4("uView", glm::value_ptr(view));
         app.ringShader.setMat4("uProjection", glm::value_ptr(proj));
@@ -682,10 +752,11 @@ void render(App& app) {
             glm::mat4 rm = glm::translate(glm::mat4(1.0f), star.pos);
             rm = glm::scale(rm, glm::vec3(o.radius));
             app.ringShader.setMat4("uModel", glm::value_ptr(rm));
-            app.ringShader.setVec4("uColor", BRIGHT_BLUE.r, BRIGHT_BLUE.g, BRIGHT_BLUE.b, 0.15f);
+            app.ringShader.setVec4("uColor", BRIGHT_BLUE.r, BRIGHT_BLUE.g, BRIGHT_BLUE.b, 0.12f);
             app.unitRing.draw();
         }
 
+        // Album planets
         app.planetShader.use();
         app.planetShader.setMat4("uView", glm::value_ptr(view));
         app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
@@ -703,17 +774,17 @@ void render(App& app) {
             app.planetShader.setVec3("uColor", star.color.r*0.9f, star.color.g*0.9f, star.color.b*0.9f);
             app.planetShader.setVec3("uLightPos", star.pos.x, star.pos.y+2, star.pos.z);
             app.planetShader.setVec3("uEmissive", star.color.r, star.color.g, star.color.b);
-            app.planetShader.setFloat("uEmissiveStrength", ai == app.selectedAlbum ? 0.4f : 0.15f);
-            app.sphereMd.draw();
+            app.planetShader.setFloat("uEmissiveStrength", ai == app.selectedAlbum ? 0.5f : 0.15f);
+            app.sphereHi.draw();
 
-            // Atmosphere glow (additive, no depth write)
+            // Atmosphere glow
             glDepthMask(GL_FALSE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);
             app.billboardShader.use();
             app.billboardShader.setMat4("uView", glm::value_ptr(view));
             app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
             glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
-            app.billboard.draw(apos, glm::vec4(star.glowColor * 0.6f, 0.3f), o.planetSize * 4.84f);
+            app.billboard.draw(apos, glm::vec4(star.glowColor * 0.5f, 0.25f), o.planetSize * 4.84f);
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
@@ -726,7 +797,7 @@ void render(App& app) {
                     glm::mat4 trm = glm::translate(glm::mat4(1.0f), apos);
                     trm = glm::scale(trm, glm::vec3(t.radius));
                     app.ringShader.setMat4("uModel", glm::value_ptr(trm));
-                    app.ringShader.setVec4("uColor", BRIGHT_BLUE.r, BRIGHT_BLUE.g, BRIGHT_BLUE.b, 0.08f);
+                    app.ringShader.setVec4("uColor", BRIGHT_BLUE.r, BRIGHT_BLUE.g, BRIGHT_BLUE.b, 0.06f);
                     app.unitRing.draw();
                 }
                 app.planetShader.use();
@@ -742,14 +813,135 @@ void render(App& app) {
                     app.planetShader.setVec3("uColor", star.color.r, star.color.g, star.color.b);
                     app.planetShader.setVec3("uEmissive", star.color.r, star.color.g, star.color.b);
                     app.planetShader.setFloat("uEmissiveStrength", 0.2f);
-                    app.sphereLo.draw();
+                    app.sphereMd.draw();
                 }
             }
-            // Restore shader state
             app.planetShader.use();
             app.planetShader.setMat4("uView", glm::value_ptr(view));
             app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
             glBindTexture(GL_TEXTURE_2D, app.texSurface);
+        }
+    }
+}
+
+void render(App& app) {
+    // Render scene to FBO for bloom
+    glBindFramebuffer(GL_FRAMEBUFFER, app.sceneFBO);
+    glViewport(0, 0, app.screenW, app.screenH);
+    glClearColor(0.0f, 0.0f, 0.005f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    renderScene(app);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // --- BLOOM: Extract bright parts ---
+    glBindFramebuffer(GL_FRAMEBUFFER, app.bloomFBO[0]);
+    glViewport(0, 0, app.bloomW, app.bloomH);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_DEPTH_TEST);
+    app.bloomBrightShader.use();
+    app.bloomBrightShader.setFloat("uThreshold", 0.3f);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, app.sceneColor);
+    app.bloomBrightShader.setInt("uScene", 0);
+    drawFullscreenQuad(app);
+
+    // --- BLOOM: Gaussian blur (ping-pong, 5 passes) ---
+    app.bloomBlurShader.use();
+    for (int pass = 0; pass < 10; pass++) {
+        bool horiz = (pass % 2 == 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, app.bloomFBO[horiz ? 1 : 0]);
+        glBindTexture(GL_TEXTURE_2D, app.bloomColor[horiz ? 0 : 1]);
+        app.bloomBlurShader.setInt("uImage", 0);
+        app.bloomBlurShader.setInt("uHorizontal", horiz ? 1 : 0);
+        app.bloomBlurShader.setFloat("uTexelSize", 1.0f / (horiz ? app.bloomW : app.bloomH));
+        drawFullscreenQuad(app);
+    }
+
+    // --- BLOOM: Composite ---
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, app.screenW, app.screenH);
+    glClear(GL_COLOR_BUFFER_BIT);
+    app.bloomCompositeShader.use();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, app.sceneColor);
+    app.bloomCompositeShader.setInt("uScene", 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, app.bloomColor[0]);
+    app.bloomCompositeShader.setInt("uBloom", 1);
+    app.bloomCompositeShader.setFloat("uBloomStrength", 0.8f);
+    drawFullscreenQuad(app);
+
+    glEnable(GL_DEPTH_TEST);
+    glActiveTexture(GL_TEXTURE0);
+}
+
+// ============================================================
+// TEXT LABELS - Project 3D positions to screen, draw with ImGui
+// ============================================================
+void renderLabels(App& app) {
+    glm::mat4 vp = app.camera.projMatrix() * app.camera.viewMatrix();
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+
+    // Artist name labels
+    for (auto& n : app.artistNodes) {
+        float distToCam = glm::length(n.pos - app.camera.position);
+        // Only show labels for nearby stars or selected star
+        float labelDist = n.isSelected ? 9999.0f : (app.currentLevel == G_ALPHA_LEVEL ? 80.0f : 30.0f);
+        if (distToCam > labelDist) continue;
+
+        glm::vec2 sp = worldToScreen(vp, n.pos + glm::vec3(0, n.radius * 0.3f, 0), app.screenW, app.screenH);
+        if (sp.x < -100 || sp.x > app.screenW + 100 || sp.y < -100 || sp.y > app.screenH + 100) continue;
+
+        float alpha = std::clamp(1.0f - (distToCam / labelDist), 0.1f, 1.0f);
+        ImU32 col = ImGui::ColorConvertFloat4ToU32(ImVec4(n.color.r, n.color.g, n.color.b, alpha * 0.9f));
+        ImU32 shadow = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, alpha * 0.6f));
+
+        const char* name = n.name.c_str();
+        ImVec2 textSize = ImGui::CalcTextSize(name);
+        ImVec2 pos(sp.x - textSize.x * 0.5f, sp.y - textSize.y - 4);
+
+        // Shadow for readability
+        dl->AddText(ImVec2(pos.x + 1, pos.y + 1), shadow, name);
+        dl->AddText(pos, col, name);
+    }
+
+    // Album/track labels when zoomed in
+    if (app.selectedArtist >= 0 && app.selectedArtist < (int)app.artistNodes.size()) {
+        auto& star = app.artistNodes[app.selectedArtist];
+
+        for (int ai = 0; ai < (int)star.albumOrbits.size(); ai++) {
+            auto& o = star.albumOrbits[ai];
+            float angle = o.angle + app.elapsedTime * o.speed;
+            glm::vec3 apos = star.pos + glm::vec3(cosf(angle)*o.radius, 0, sinf(angle)*o.radius);
+
+            glm::vec2 sp = worldToScreen(vp, apos + glm::vec3(0, o.planetSize * 1.5f, 0), app.screenW, app.screenH);
+            if (sp.x < -100 || sp.x > app.screenW + 100) continue;
+
+            float alpha = (ai == app.selectedAlbum) ? 1.0f : 0.6f;
+            ImU32 col = ImGui::ColorConvertFloat4ToU32(ImVec4(0.7f, 0.85f, 1.0f, alpha));
+            ImU32 shadow = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, alpha * 0.5f));
+
+            ImVec2 ts = ImGui::CalcTextSize(o.name.c_str());
+            ImVec2 pos(sp.x - ts.x * 0.5f, sp.y - ts.y);
+            dl->AddText(ImVec2(pos.x + 1, pos.y + 1), shadow, o.name.c_str());
+            dl->AddText(pos, col, o.name.c_str());
+
+            // Track moon labels for selected album
+            if (ai == app.selectedAlbum) {
+                for (auto& t : o.tracks) {
+                    float ta = t.angle + app.elapsedTime * t.speed;
+                    glm::vec3 mp = apos + glm::vec3(cosf(ta)*t.radius, 0, sinf(ta)*t.radius);
+                    glm::vec2 msp = worldToScreen(vp, mp + glm::vec3(0, t.size * 2.0f, 0), app.screenW, app.screenH);
+                    if (msp.x < 0 || msp.x > app.screenW) continue;
+
+                    ImU32 tc = ImGui::ColorConvertFloat4ToU32(ImVec4(0.6f, 0.7f, 0.8f, 0.7f));
+                    ImU32 ts2 = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, 0.4f));
+                    ImVec2 tts = ImGui::CalcTextSize(t.name.c_str());
+                    ImVec2 tp(msp.x - tts.x * 0.5f, msp.y - tts.y);
+                    dl->AddText(ImVec2(tp.x + 1, tp.y + 1), ts2, t.name.c_str());
+                    dl->AddText(tp, tc, t.name.c_str());
+                }
+            }
         }
     }
 }
@@ -925,6 +1117,9 @@ void renderUI(App& app) {
 
     app.imguiWantsMouse = ImGui::GetIO().WantCaptureMouse;
 
+    // Render 3D text labels via ImGui draw lists
+    renderLabels(app);
+
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 }
@@ -1074,9 +1269,15 @@ int main(int argc, char* argv[]) {
 
         handleEvents(app);
         if (app.libraryLoaded.exchange(false)) buildScene(app);
+
+        // Rebuild bloom FBOs on resize
+        if (app.screenW / 2 != app.bloomW || app.screenH / 2 != app.bloomH) {
+            setupBloom(app);
+        }
+
         app.camera.update(dt);
         render(app);
-        renderUI(app);
+        renderUI(app);   // also calls renderLabels inside ImGui frame
         SDL_GL_SwapWindow(app.window);
     }
 
