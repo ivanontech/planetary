@@ -429,6 +429,8 @@ struct AudioPlayer {
         ma_sound_start(&sound);
         playing = true;
         std::cout << "[Audio] Playing: " << name << " by " << artist << std::endl;
+        // Decode for visual analysis (separate from playback)
+        decodeForAnalysis(path);
     }
 
     void togglePause() {
@@ -473,9 +475,85 @@ struct AudioPlayer {
         return ma_sound_at_end(&sound);
     }
 
+    // Audio analysis buffer
+    std::vector<float> analysisBuffer;
+    ma_uint32 analysisSampleRate = 44100;
+    ma_uint64 analysisTotalFrames = 0;
+
+    void decodeForAnalysis(const std::string& path) {
+        ma_decoder decoder;
+        ma_decoder_config decoderConfig = ma_decoder_config_init(ma_format_f32, 1, 44100);
+        if (ma_decoder_init_file(path.c_str(), &decoderConfig, &decoder) != MA_SUCCESS) {
+            std::cout << "[Audio] Analysis decode failed: " << path << std::endl;
+            return;
+        }
+        ma_uint64 totalFrames;
+        ma_decoder_get_length_in_pcm_frames(&decoder, &totalFrames);
+        analysisTotalFrames = totalFrames;
+        analysisSampleRate = 44100;
+        analysisBuffer.resize(totalFrames);
+        ma_uint64 framesRead;
+        ma_decoder_read_pcm_frames(&decoder, analysisBuffer.data(), totalFrames, &framesRead);
+        ma_decoder_uninit(&decoder);
+        std::cout << "[Audio] Analysis: " << framesRead << " frames decoded" << std::endl;
+    }
+
+    // Get audio samples at current position for analysis
+    float getRMSAtCursor(int windowSize = 1024) {
+        if (analysisBuffer.empty() || !soundInit) return 0;
+        float cursor = 0;
+        ma_sound_get_cursor_in_seconds(&sound, &cursor);
+        ma_uint64 pos = (ma_uint64)(cursor * analysisSampleRate);
+        if (pos + windowSize >= analysisTotalFrames) return 0;
+        float sum = 0;
+        for (int i = 0; i < windowSize; i++) {
+            float s = analysisBuffer[pos + i];
+            sum += s * s;
+        }
+        return sqrtf(sum / windowSize);
+    }
+
+    // Simple bass detection (average of low-frequency energy)
+    float getBassAtCursor(int windowSize = 2048) {
+        if (analysisBuffer.empty() || !soundInit) return 0;
+        float cursor = 0;
+        ma_sound_get_cursor_in_seconds(&sound, &cursor);
+        ma_uint64 pos = (ma_uint64)(cursor * analysisSampleRate);
+        if (pos + windowSize >= analysisTotalFrames) return 0;
+        // Simple low-pass: average consecutive sample differences
+        float sum = 0;
+        float prev = analysisBuffer[pos];
+        int count = 0;
+        for (int i = 1; i < windowSize; i += 4) { // subsample for bass
+            float s = analysisBuffer[pos + i];
+            float avg = (prev + s) * 0.5f; // low-pass
+            sum += avg * avg;
+            prev = s;
+            count++;
+        }
+        return sqrtf(sum / std::max(count, 1));
+    }
+
+    // Treble detection
+    float getTrebleAtCursor(int windowSize = 512) {
+        if (analysisBuffer.empty() || !soundInit) return 0;
+        float cursor = 0;
+        ma_sound_get_cursor_in_seconds(&sound, &cursor);
+        ma_uint64 pos = (ma_uint64)(cursor * analysisSampleRate);
+        if (pos + windowSize >= analysisTotalFrames) return 0;
+        // High-pass: sum of sample-to-sample differences
+        float sum = 0;
+        for (int i = 1; i < windowSize; i++) {
+            float diff = analysisBuffer[pos + i] - analysisBuffer[pos + i - 1];
+            sum += diff * diff;
+        }
+        return sqrtf(sum / windowSize) * 4.0f; // amplify treble
+    }
+
     void cleanup() {
         if (soundInit) ma_sound_uninit(&sound);
         if (engineInit) ma_engine_uninit(&engine);
+        analysisBuffer.clear();
     }
 };
 
@@ -592,27 +670,26 @@ std::string loadConfig() {
 // ============================================================
 void updateAudioAnalysis(App& app, float dt) {
     if (!app.audio.soundInit || !app.audio.playing) {
-        app.audioLevel *= 0.95f; // Decay
-        app.audioPeak *= 0.98f;
-        app.audioBass *= 0.95f;
-        app.audioWave *= 0.97f;
+        app.audioLevel *= 0.92f;
+        app.audioPeak *= 0.95f;
+        app.audioBass *= 0.92f;
+        app.audioWave *= 0.94f;
         return;
     }
 
-    // Get current cursor position as a proxy for beat detection
-    float cursor = app.audio.currentTime();
-    float progress = app.audio.progress();
+    // REAL audio analysis from decoded buffer
+    float rms = app.audio.getRMSAtCursor(1024);
+    float bass = app.audio.getBassAtCursor(2048);
+    float treble = app.audio.getTrebleAtCursor(512);
 
-    // Simulate audio energy using time-based patterns
-    // (Real FFT would need a custom audio callback -- this approximation works visually)
-    float t = cursor * 8.0f; // ~8 "beats" per second at 120bpm
-    float beat = powf(fabsf(sinf(t * (float)M_PI)), 4.0f); // Sharp peaks
-    float bass = powf(fabsf(sinf(t * (float)M_PI * 0.5f)), 2.0f); // Slower bass
+    // Smooth the values for visual appeal
+    float targetLevel = std::min(rms * 3.0f, 1.0f);
+    float targetBass = std::min(bass * 4.0f, 1.0f);
 
-    app.audioLevel = 0.3f + beat * 0.7f;
-    app.audioPeak = std::max(app.audioPeak * 0.97f, app.audioLevel);
-    app.audioBass = 0.2f + bass * 0.8f;
-    app.audioWave += (app.audioLevel - app.audioWave) * 5.0f * dt;
+    app.audioLevel += (targetLevel - app.audioLevel) * 8.0f * dt;
+    app.audioPeak = std::max(app.audioPeak * 0.96f, app.audioLevel);
+    app.audioBass += (targetBass - app.audioBass) * 6.0f * dt;
+    app.audioWave += (app.audioLevel - app.audioWave) * 10.0f * dt;
 }
 
 // ============================================================
