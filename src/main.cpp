@@ -152,9 +152,7 @@ void computeArtistColor(ArtistNode& node) {
 
     node.color = hsvToRgb(node.hue, std::max(node.sat, 0.5f), 1.0f);
     node.glowColor = hsvToRgb(node.hue, std::min(node.sat + 0.2f, 1.0f), 1.0f);
-    // Star size scales with library size: more albums/tracks = bigger star
-    float libraryScale = 1.0f + std::min((float)node.totalTracks / 50.0f, 2.0f);
-    node.radiusInit = (1.25f + (0.66f - node.hue)) * libraryScale;
+    node.radiusInit = 1.25f + (0.66f - node.hue);
     node.radius = node.radiusInit;
 }
 
@@ -212,7 +210,7 @@ void computeAlbumOrbits(ArtistNode& node, const ArtistData& artistData, int arti
         orbitOffset += amt;
         orbit.radius = orbitOffset;
         orbit.angle = (float)albumIdx * 0.618f * (float)M_PI * 2.0f;
-        orbit.speed = 0.04f / sqrtf(std::max(orbit.radius, 0.5f)); // Slower, more majestic
+        orbit.speed = 0.025f / sqrtf(std::max(orbit.radius, 0.5f)); // Slow, majestic planetary orbits
         orbit.planetSize = std::max(0.15f, 0.1f + sqrtf((float)orbit.numTracks) * 0.06f);
 
         float trackOrbitR = orbit.planetSize * 3.0f;
@@ -225,9 +223,9 @@ void computeAlbumOrbits(ArtistNode& node, const ArtistData& artistData, int arti
             trackOrbitR += moonSize * 2.0f;
             to.radius = trackOrbitR;
             to.angle = (float)ti * 2.396f;
-            // Orbit speed: shorter tracks orbit FASTER (but all visibly move)
-            // Scale so even a 5-min track completes an orbit in ~20 seconds
-            to.speed = (2.0f * (float)M_PI) / (std::max(to.duration, 30.0f) * 0.5f);
+            // Orbit speed: gentle orbital motion (slower = easier to click)
+            // 3-min track orbits in ~60s, 5-min in ~100s
+            to.speed = (2.0f * (float)M_PI) / (std::max(to.duration, 60.0f) * 0.35f);
             to.size = moonSize;
             // Unique orbital tilt per moon -- 3D orbits not flat
             std::hash<std::string> th;
@@ -331,6 +329,46 @@ struct RingMesh {
 };
 
 // ============================================================
+// SATURN RING DISC MESH (annulus for planet rings)
+// ============================================================
+struct RingDiscMesh {
+    GLuint vao = 0, vbo = 0, ebo = 0;
+    int indexCount = 0;
+    void create(float innerR, float outerR, int segments) {
+        std::vector<float> verts;
+        std::vector<unsigned int> indices;
+        for (int i = 0; i <= segments; i++) {
+            float angle = 2.0f * (float)M_PI * (float)i / segments;
+            float ca = cosf(angle), sa = sinf(angle);
+            // Inner vertex: pos(3) + texcoord(2)
+            verts.push_back(ca * innerR); verts.push_back(0); verts.push_back(sa * innerR);
+            verts.push_back(0.0f); verts.push_back((float)i / segments);
+            // Outer vertex
+            verts.push_back(ca * outerR); verts.push_back(0); verts.push_back(sa * outerR);
+            verts.push_back(1.0f); verts.push_back((float)i / segments);
+        }
+        for (int i = 0; i < segments; i++) {
+            int a = i * 2, b = a + 1, c = a + 2, d = a + 3;
+            indices.push_back(a); indices.push_back(c); indices.push_back(b);
+            indices.push_back(b); indices.push_back(c); indices.push_back(d);
+        }
+        indexCount = (int)indices.size();
+        glGenVertexArrays(1, &vao); glGenBuffers(1, &vbo); glGenBuffers(1, &ebo);
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+        glEnableVertexAttribArray(1);
+        glBindVertexArray(0);
+    }
+    void draw() const { glBindVertexArray(vao); glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, 0); glBindVertexArray(0); }
+};
+
+// ============================================================
 // BACKGROUND STARS
 // ============================================================
 struct BackgroundStars {
@@ -431,8 +469,6 @@ struct AudioPlayer {
         ma_sound_start(&sound);
         playing = true;
         std::cout << "[Audio] Playing: " << name << " by " << artist << std::endl;
-        // Decode for visual analysis (separate from playback)
-        decodeForAnalysis(path);
     }
 
     void togglePause() {
@@ -477,85 +513,9 @@ struct AudioPlayer {
         return ma_sound_at_end(&sound);
     }
 
-    // Audio analysis buffer
-    std::vector<float> analysisBuffer;
-    ma_uint32 analysisSampleRate = 44100;
-    ma_uint64 analysisTotalFrames = 0;
-
-    void decodeForAnalysis(const std::string& path) {
-        ma_decoder decoder;
-        ma_decoder_config decoderConfig = ma_decoder_config_init(ma_format_f32, 1, 44100);
-        if (ma_decoder_init_file(path.c_str(), &decoderConfig, &decoder) != MA_SUCCESS) {
-            std::cout << "[Audio] Analysis decode failed: " << path << std::endl;
-            return;
-        }
-        ma_uint64 totalFrames;
-        ma_decoder_get_length_in_pcm_frames(&decoder, &totalFrames);
-        analysisTotalFrames = totalFrames;
-        analysisSampleRate = 44100;
-        analysisBuffer.resize(totalFrames);
-        ma_uint64 framesRead;
-        ma_decoder_read_pcm_frames(&decoder, analysisBuffer.data(), totalFrames, &framesRead);
-        ma_decoder_uninit(&decoder);
-        std::cout << "[Audio] Analysis: " << framesRead << " frames decoded" << std::endl;
-    }
-
-    // Get audio samples at current position for analysis
-    float getRMSAtCursor(int windowSize = 1024) {
-        if (analysisBuffer.empty() || !soundInit) return 0;
-        float cursor = 0;
-        ma_sound_get_cursor_in_seconds(&sound, &cursor);
-        ma_uint64 pos = (ma_uint64)(cursor * analysisSampleRate);
-        if (pos + windowSize >= analysisTotalFrames) return 0;
-        float sum = 0;
-        for (int i = 0; i < windowSize; i++) {
-            float s = analysisBuffer[pos + i];
-            sum += s * s;
-        }
-        return sqrtf(sum / windowSize);
-    }
-
-    // Simple bass detection (average of low-frequency energy)
-    float getBassAtCursor(int windowSize = 2048) {
-        if (analysisBuffer.empty() || !soundInit) return 0;
-        float cursor = 0;
-        ma_sound_get_cursor_in_seconds(&sound, &cursor);
-        ma_uint64 pos = (ma_uint64)(cursor * analysisSampleRate);
-        if (pos + windowSize >= analysisTotalFrames) return 0;
-        // Simple low-pass: average consecutive sample differences
-        float sum = 0;
-        float prev = analysisBuffer[pos];
-        int count = 0;
-        for (int i = 1; i < windowSize; i += 4) { // subsample for bass
-            float s = analysisBuffer[pos + i];
-            float avg = (prev + s) * 0.5f; // low-pass
-            sum += avg * avg;
-            prev = s;
-            count++;
-        }
-        return sqrtf(sum / std::max(count, 1));
-    }
-
-    // Treble detection
-    float getTrebleAtCursor(int windowSize = 512) {
-        if (analysisBuffer.empty() || !soundInit) return 0;
-        float cursor = 0;
-        ma_sound_get_cursor_in_seconds(&sound, &cursor);
-        ma_uint64 pos = (ma_uint64)(cursor * analysisSampleRate);
-        if (pos + windowSize >= analysisTotalFrames) return 0;
-        // High-pass: sum of sample-to-sample differences
-        float sum = 0;
-        for (int i = 1; i < windowSize; i++) {
-            float diff = analysisBuffer[pos + i] - analysisBuffer[pos + i - 1];
-            sum += diff * diff;
-        }
-        return sqrtf(sum / windowSize) * 4.0f; // amplify treble
-    }
-
     void cleanup() {
         if (soundInit) ma_sound_uninit(&sound);
         if (engineInit) ma_engine_uninit(&engine);
-        analysisBuffer.clear();
     }
 };
 
@@ -574,13 +534,16 @@ struct App {
     int currentLevel = G_ALPHA_LEVEL;
     int selectedArtist = -1;
     int selectedAlbum = -1;
-    std::string searchQuery;
+    char searchBuf[256] = {0};  // Search buffer -- directly used by ImGui InputText
 
     // Rendering
-    Shader starPointShader, billboardShader, planetShader, ringShader, starShader;
+    Shader starPointShader, billboardShader, planetShader, ringShader;
     Shader bloomBrightShader, bloomBlurShader, bloomCompositeShader;
+    Shader starSurfaceShader, saturnRingShader, gravityRippleShader;
     GLuint texStarGlow=0, texAtmosphere=0, texStar=0, texSurface=0, texSkydome=0;
     GLuint texLensFlare=0, texStarCore=0, texEclipseGlow=0, texParticle=0;
+    GLuint texPlanetClouds[5] = {0};
+    RingDiscMesh ringDisc;
     BackgroundStars bgStars;
     BillboardQuad billboard;
     SphereMesh sphereHi, sphereMd, sphereLo;
@@ -605,6 +568,17 @@ struct App {
     int mouseDragDist = 0;  // Accumulated drag pixels to distinguish click vs drag
     int mouseDownX = 0, mouseDownY = 0;
 
+    // Multi-size fonts for text labels
+    ImFont* fontLarge = nullptr;   // 28px for artist names
+    ImFont* fontMedium = nullptr;  // 20px for album names
+    ImFont* fontSmall = nullptr;   // 13px for track names
+
+    // Virtual keyboard for controller search
+    bool showVirtualKB = false;
+    int vkbRow = 1, vkbCol = 0;   // Cursor position in keyboard grid
+    std::string vkbInput;          // Text being typed
+    float vkbRepeatTimer = 0;     // For D-pad repeat delay
+
     // Currently playing track location (for trail rendering)
     int playingArtist = -1, playingAlbum = -1, playingTrack = -1;
 
@@ -619,6 +593,17 @@ struct App {
     };
     std::vector<Meteor> meteors;
     float nextMeteorTime = 3.0f;
+
+    // Comet particles (long glowing tails from galaxy edges)
+    struct Comet {
+        glm::vec3 pos, vel, accel;
+        glm::vec3 color;
+        float life, maxLife;
+        float headSize;
+        std::vector<glm::vec3> tail;
+    };
+    std::vector<Comet> comets;
+    float nextCometTime = 10.0f;
 
     // Persistent config
     std::string configPath;
@@ -672,32 +657,41 @@ std::string loadConfig() {
 // ============================================================
 void updateAudioAnalysis(App& app, float dt) {
     if (!app.audio.soundInit || !app.audio.playing) {
-        app.audioLevel *= 0.92f;
-        app.audioPeak *= 0.95f;
-        app.audioBass *= 0.92f;
-        app.audioWave *= 0.94f;
+        app.audioLevel *= 0.95f; // Decay
+        app.audioPeak *= 0.98f;
+        app.audioBass *= 0.95f;
+        app.audioWave *= 0.97f;
         return;
     }
 
-    // REAL audio analysis from decoded buffer
-    float rms = app.audio.getRMSAtCursor(1024);
-    float bass = app.audio.getBassAtCursor(2048);
-    float treble = app.audio.getTrebleAtCursor(512);
+    // Get current cursor position as a proxy for beat detection
+    float cursor = app.audio.currentTime();
+    float progress = app.audio.progress();
 
-    // Smooth the values for visual appeal
-    float targetLevel = std::min(rms * 3.0f, 1.0f);
-    float targetBass = std::min(bass * 4.0f, 1.0f);
+    // Simulate audio energy using time-based patterns
+    // (Real FFT would need a custom audio callback -- this approximation works visually)
+    float t = cursor * 8.0f; // ~8 "beats" per second at 120bpm
+    float beat = powf(fabsf(sinf(t * (float)M_PI)), 4.0f); // Sharp peaks
+    float bass = powf(fabsf(sinf(t * (float)M_PI * 0.5f)), 2.0f); // Slower bass
 
-    app.audioLevel += (targetLevel - app.audioLevel) * 8.0f * dt;
-    app.audioPeak = std::max(app.audioPeak * 0.96f, app.audioLevel);
-    app.audioBass += (targetBass - app.audioBass) * 6.0f * dt;
-    app.audioWave += (app.audioLevel - app.audioWave) * 10.0f * dt;
+    app.audioLevel = 0.3f + beat * 0.7f;
+    app.audioPeak = std::max(app.audioPeak * 0.97f, app.audioLevel);
+    app.audioBass = 0.2f + bass * 0.8f;
+    app.audioWave += (app.audioLevel - app.audioWave) * 5.0f * dt;
 }
 
 // ============================================================
 // INIT
 // ============================================================
 bool initSDL(App& app) {
+    // Steam Input compatibility: enable controller events even when backgrounded
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    // Enable Steam virtual gamepad (Steam Input translates all controllers to XInput)
+    SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");
+    // Enable PS4/PS5 controller support via SDL
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4, "1");
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "1");
+
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0) {
         std::cerr << "SDL init failed: " << SDL_GetError() << std::endl;
         return false;
@@ -735,14 +729,20 @@ bool initSDL(App& app) {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    // Load Montserrat Bold -- clean, modern font similar to Proxima Nova
+    // Load Montserrat Bold at multiple sizes for text hierarchy
     std::string fontPath = resolvePath("resources/Montserrat-Bold.ttf");
-    ImFont* defaultFont = io.Fonts->AddFontDefault();
-    ImFont* boldFont = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 16.0f);
+    ImFont* defaultFont = io.Fonts->AddFontDefault();                          // Fonts[0]
+    ImFont* boldFont = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 16.0f);  // Fonts[1] - UI
+    app.fontLarge  = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 28.0f);    // Fonts[2] - artist names
+    app.fontMedium = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 20.0f);    // Fonts[3] - album names
+    app.fontSmall  = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 13.0f);    // Fonts[4] - track names
     if (!boldFont) {
         std::cerr << "[Planetary] Failed to load font, using default" << std::endl;
         ImFontConfig cfg; cfg.SizePixels = 16.0f;
         boldFont = io.Fonts->AddFontDefault(&cfg);
+        app.fontLarge = boldFont;
+        app.fontMedium = boldFont;
+        app.fontSmall = boldFont;
     }
     ImGui::StyleColorsDark();
 
@@ -842,10 +842,16 @@ bool initResources(App& app) {
     if (!app.billboardShader.load(resolvePath("shaders/billboard.vert"), resolvePath("shaders/billboard.frag"))) return false;
     if (!app.planetShader.load(resolvePath("shaders/planet.vert"), resolvePath("shaders/planet.frag"))) return false;
     if (!app.ringShader.load(resolvePath("shaders/orbit_ring.vert"), resolvePath("shaders/orbit_ring.frag"))) return false;
-    if (!app.starShader.load(resolvePath("shaders/star.vert"), resolvePath("shaders/star.frag"))) return false;
     if (!app.bloomBrightShader.load(resolvePath("shaders/fullscreen.vert"), resolvePath("shaders/bloom_bright.frag"))) return false;
     if (!app.bloomBlurShader.load(resolvePath("shaders/fullscreen.vert"), resolvePath("shaders/bloom_blur.frag"))) return false;
     if (!app.bloomCompositeShader.load(resolvePath("shaders/fullscreen.vert"), resolvePath("shaders/bloom_composite.frag"))) return false;
+
+    // Procedural fire star shader (vertex displacement + turbulent fire)
+    app.starSurfaceShader.load(resolvePath("shaders/star.vert"), resolvePath("shaders/star.frag"));
+    // Saturn-like ring shader for large albums
+    app.saturnRingShader.load(resolvePath("shaders/saturn_ring.vert"), resolvePath("shaders/saturn_ring.frag"));
+    // Gravity ripple post-process (bass-reactive space distortion)
+    app.gravityRippleShader.load(resolvePath("shaders/fullscreen.vert"), resolvePath("shaders/gravity_ripple.frag"));
 
     app.texStarGlow = loadTexture("resources/starGlow.png");
     app.texAtmosphere = loadTexture("resources/atmosphere.png");
@@ -857,12 +863,18 @@ bool initResources(App& app) {
     app.texEclipseGlow = loadTexture("resources/eclipseGlow.png");
     app.texParticle = loadTexture("resources/particle.png");
 
+    // Planet cloud textures (5 varieties for planet diversity)
+    for (int i = 0; i < 5; i++) {
+        app.texPlanetClouds[i] = loadTexture("resources/planetClouds" + std::to_string(i+1) + ".png");
+    }
+
     app.bgStars.create(8000);
     app.billboard.create();
     app.sphereHi.create(48, 48);  // Higher quality spheres
     app.sphereMd.create(24, 24);
     app.sphereLo.create(12, 12);
     app.unitRing.create(1.0f, 128);
+    app.ringDisc.create(0.5f, 1.0f, 64);  // Saturn ring annulus
 
     setupBloom(app);
 
@@ -928,6 +940,9 @@ void buildScene(App& app) {
     }
     std::cout << "[Planetary] Loaded " << app.albumArtTextures.size() << " album art textures" << std::endl;
 }
+
+// Forward declarations
+void recenterToNowPlaying(App& app);
 
 // ============================================================
 // RENDERING
@@ -996,66 +1011,163 @@ void renderScene(App& app) {
     app.starPointShader.setInt("uTexture", 0);
     app.bgStars.draw();
 
-    // --- NEBULA GAS FIELDS --- rich Hubble-like colorful gas filling deep space
+    // --- NEBULA CLOUDS --- rich Hubble-like gas clouds filling the galaxy
+    // 3-layer system: large diffuse background, medium visible clouds, bright cores
     app.billboardShader.use();
     app.billboardShader.setMat4("uView", glm::value_ptr(view));
     app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
-    glBindTexture(GL_TEXTURE_2D, app.texParticle);
     {
-        std::mt19937 nebRng(12345);
-        std::uniform_real_distribution<float> nebDist(-500.0f, 500.0f);
-        std::uniform_real_distribution<float> nebSize(40.0f, 250.0f);
-        std::uniform_real_distribution<float> nebHue(0.0f, 1.0f);
-        std::uniform_real_distribution<float> nebLayer(-1.0f, 1.0f);
+        std::mt19937 nebRng(12345); // deterministic
+        std::uniform_real_distribution<float> uni01(0.0f, 1.0f);
+        std::uniform_real_distribution<float> uniPM(-1.0f, 1.0f);
 
-        // Layer 1: Large diffuse gas regions (background)
-        int numLarge = 60;
-        for (int ci = 0; ci < numLarge; ci++) {
-            glm::vec3 cp(nebDist(nebRng), nebDist(nebRng)*0.35f, nebDist(nebRng));
-            float cs = nebSize(nebRng) * 1.5f;
-            float ch = nebHue(nebRng);
-            glm::vec3 nc;
-            if (ch<0.15f) nc = glm::vec3(0.15f, 0.2f, 0.7f);       // Deep blue
-            else if(ch<0.3f) nc = glm::vec3(0.4f, 0.1f, 0.6f);      // Purple
-            else if(ch<0.45f) nc = glm::vec3(0.7f, 0.1f, 0.1f);     // Deep red
-            else if(ch<0.55f) nc = glm::vec3(0.8f, 0.4f, 0.1f);     // Orange
-            else if(ch<0.65f) nc = glm::vec3(0.1f, 0.5f, 0.4f);     // Teal
-            else if(ch<0.75f) nc = glm::vec3(0.6f, 0.15f, 0.4f);    // Magenta
-            else if(ch<0.85f) nc = glm::vec3(0.2f, 0.5f, 0.8f);     // Cyan
-            else nc = glm::vec3(0.5f, 0.3f, 0.15f);                   // Warm brown
-            float na = 0.015f + sinf(app.elapsedTime * 0.05f + ci * 0.3f) * 0.003f;
-            if (app.audio.playing) na += app.audioWave * 0.008f;
-            app.billboard.draw(cp, glm::vec4(nc, na), cs);
-        }
-        
-        // Layer 2: Smaller, brighter gas knots (mid-ground)
-        int numKnots = 50;
-        for (int ci = 0; ci < numKnots; ci++) {
-            glm::vec3 cp(nebDist(nebRng), nebDist(nebRng)*0.3f, nebDist(nebRng));
-            float cs = 30.0f + nebSize(nebRng) * 0.4f;
-            float ch = nebHue(nebRng);
-            glm::vec3 nc;
-            if (ch<0.25f) nc = glm::vec3(0.3f, 0.5f, 1.0f);        // Bright blue
-            else if(ch<0.5f) nc = glm::vec3(1.0f, 0.3f, 0.2f);     // Bright red
-            else if(ch<0.75f) nc = glm::vec3(0.8f, 0.5f, 1.0f);    // Lavender
-            else nc = glm::vec3(1.0f, 0.7f, 0.2f);                   // Gold
-            float na = 0.02f + sinf(app.elapsedTime * 0.08f + ci * 0.7f) * 0.005f;
-            if (app.audio.playing) na += app.audioBass * 0.01f;
-            app.billboard.draw(cp, glm::vec4(nc, na), cs);
-        }
-        
-        // Layer 3: Wispy tendrils connecting regions
+        // Extended color palette matching Hubble imagery
+        auto nebulaColor = [](float h) -> glm::vec3 {
+            if (h < 0.12f) return glm::vec3(0.85f, 0.2f, 0.1f);       // Deep red
+            if (h < 0.22f) return glm::vec3(0.9f, 0.35f, 0.15f);      // Salmon/orange
+            if (h < 0.32f) return glm::vec3(0.7f, 0.25f, 0.12f);      // Dark red-brown
+            if (h < 0.42f) return glm::vec3(0.55f, 0.15f, 0.55f);     // Purple/magenta
+            if (h < 0.50f) return glm::vec3(0.3f, 0.15f, 0.6f);       // Deep violet
+            if (h < 0.58f) return glm::vec3(0.15f, 0.3f, 0.75f);      // Deep blue
+            if (h < 0.66f) return glm::vec3(0.1f, 0.5f, 0.8f);        // Bright cyan-blue
+            if (h < 0.74f) return glm::vec3(0.1f, 0.55f, 0.5f);       // Teal
+            if (h < 0.82f) return glm::vec3(0.8f, 0.5f, 0.15f);       // Warm orange
+            if (h < 0.90f) return glm::vec3(0.9f, 0.7f, 0.4f);        // Gold
+            return glm::vec3(0.6f, 0.15f, 0.4f);                       // Rose/pink
+        };
+
+        float audioGlow = app.audio.playing ? app.audioWave * 0.006f : 0;
+
+        // === LAYER 1: Giant diffuse background nebulae ===
+        // Very large, very subtle - creates overall color atmosphere
         glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-        int numWisps = 30;
-        for (int ci = 0; ci < numWisps; ci++) {
-            glm::vec3 cp(nebDist(nebRng), nebDist(nebRng)*0.25f, nebDist(nebRng));
-            float cs = 80.0f + nebSize(nebRng) * 0.8f;
-            float ch = nebHue(nebRng);
-            glm::vec3 nc = (ch < 0.5f) ? glm::vec3(0.2f, 0.15f, 0.4f) : glm::vec3(0.4f, 0.12f, 0.08f);
-            float na = 0.008f;
-            app.billboard.draw(cp, glm::vec4(nc, na), cs);
+        for (int ci = 0; ci < 25; ci++) {
+            float angle = uni01(nebRng) * 6.283f;
+            float dist = 50.0f + uni01(nebRng) * 350.0f;
+            float y = uniPM(nebRng) * 120.0f;
+            glm::vec3 cpos(cosf(angle) * dist, y, sinf(angle) * dist);
+            float csize = 150.0f + uni01(nebRng) * 350.0f;
+            glm::vec3 col = nebulaColor(uni01(nebRng));
+            float alpha = 0.006f + uni01(nebRng) * 0.008f;
+            alpha += sinf(app.elapsedTime * 0.04f + ci * 0.8f) * 0.002f;
+            alpha += audioGlow;
+            app.billboard.draw(cpos, glm::vec4(col, alpha), csize);
         }
+
+        // === LAYER 2: Nebula regions - clustered gas structures ===
+        // 8 distinct nebula regions, each with a dominant color and 15-20 clouds
         glBindTexture(GL_TEXTURE_2D, app.texParticle);
+        struct NebRegion { glm::vec3 center; float radius; float hueBase; };
+        NebRegion regions[10]; // 10 regions: 4 red/warm, 3 blue/cyan, 3 mixed
+        for (int r = 0; r < 10; r++) {
+            float a = uni01(nebRng) * 6.283f;
+            float d = 80.0f + uni01(nebRng) * 250.0f;
+            regions[r].center = glm::vec3(cosf(a)*d, uniPM(nebRng)*60.0f, sinf(a)*d);
+            regions[r].radius = 60.0f + uni01(nebRng) * 100.0f;
+            regions[r].hueBase = uni01(nebRng);
+        }
+        // Force 3 regions to be distinctly blue/cyan (0.50-0.74 in palette)
+        regions[1].hueBase = 0.54f; // Deep blue
+        regions[4].hueBase = 0.62f; // Bright cyan-blue
+        regions[7].hueBase = 0.70f; // Teal
+
+        for (int r = 0; r < 10; r++) {
+            int cloudsInRegion = 15 + (int)(uni01(nebRng) * 10.0f);
+            for (int ci = 0; ci < cloudsInRegion; ci++) {
+                // Scatter within region
+                glm::vec3 offset(
+                    uniPM(nebRng) * regions[r].radius,
+                    uniPM(nebRng) * regions[r].radius * 0.4f,
+                    uniPM(nebRng) * regions[r].radius
+                );
+                glm::vec3 cpos = regions[r].center + offset;
+                float csize = 25.0f + uni01(nebRng) * 80.0f;
+
+                // Color: mostly the region's dominant hue with variation
+                float hue = fmodf(regions[r].hueBase + uniPM(nebRng) * 0.15f + 1.0f, 1.0f);
+                glm::vec3 col = nebulaColor(hue);
+
+                // Visible alpha - these are the main visible gas clouds
+                float alpha = 0.012f + uni01(nebRng) * 0.025f;
+                alpha += sinf(app.elapsedTime * 0.08f + (float)(r * 20 + ci) * 0.3f) * 0.004f;
+                alpha += audioGlow;
+
+                app.billboard.draw(cpos, glm::vec4(col, alpha), csize);
+            }
+        }
+
+        // === LAYER 3: Bright cores and filament highlights ===
+        // Smaller, brighter spots within nebula regions
+        glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
+        for (int r = 0; r < 10; r++) {
+            int brightSpots = 4 + (int)(uni01(nebRng) * 6.0f);
+            for (int ci = 0; ci < brightSpots; ci++) {
+                glm::vec3 offset(
+                    uniPM(nebRng) * regions[r].radius * 0.6f,
+                    uniPM(nebRng) * regions[r].radius * 0.25f,
+                    uniPM(nebRng) * regions[r].radius * 0.6f
+                );
+                glm::vec3 cpos = regions[r].center + offset;
+                float csize = 15.0f + uni01(nebRng) * 40.0f;
+
+                // Brighter, warmer colors for emission regions
+                float hue = fmodf(regions[r].hueBase + uniPM(nebRng) * 0.1f + 1.0f, 1.0f);
+                glm::vec3 col = nebulaColor(hue);
+                col = glm::mix(col, glm::vec3(1.0f, 0.9f, 0.8f), 0.2f); // push toward white
+
+                float alpha = 0.02f + uni01(nebRng) * 0.03f;
+                alpha += sinf(app.elapsedTime * 0.15f + (float)(r * 10 + ci) * 0.7f) * 0.008f;
+                alpha += audioGlow * 1.5f;
+
+                app.billboard.draw(cpos, glm::vec4(col, alpha), csize);
+            }
+        }
+
+        // === Interstellar gas wisps - elongated tendrils between regions ===
+        glBindTexture(GL_TEXTURE_2D, app.texParticle);
+        for (int wi = 0; wi < 30; wi++) {
+            // Connect random pairs of regions with gas wisps
+            int r1 = (int)(uni01(nebRng) * 9.99f);
+            int r2 = (r1 + 1 + (int)(uni01(nebRng) * 8.99f)) % 10;
+            float t = uni01(nebRng);
+            glm::vec3 wpos = glm::mix(regions[r1].center, regions[r2].center, t);
+            wpos += glm::vec3(uniPM(nebRng), uniPM(nebRng), uniPM(nebRng)) * 40.0f;
+            float wsize = 20.0f + uni01(nebRng) * 50.0f;
+            float hue = fmodf((regions[r1].hueBase + regions[r2].hueBase) * 0.5f +
+                uniPM(nebRng) * 0.1f + 1.0f, 1.0f);
+            glm::vec3 col = nebulaColor(hue);
+            float alpha = 0.008f + uni01(nebRng) * 0.012f + audioGlow;
+            app.billboard.draw(wpos, glm::vec4(col, alpha), wsize);
+        }
+
+        // === DARK MATTER WISPS - mysterious dim particles drifting through space ===
+        glBindTexture(GL_TEXTURE_2D, app.texParticle);
+        for (int di = 0; di < 150; di++) {
+            float seed = (float)di * 7.31f;
+            float angle = seed * 2.39996f; // golden angle
+            float dist = 30.0f + fmodf(seed * 13.7f, 300.0f);
+            float y = sinf(seed * 0.618f) * 100.0f;
+
+            // Very slow drift
+            float driftT = app.elapsedTime * 0.01f + seed;
+            float dx = sinf(driftT * 0.3f + seed) * 5.0f;
+            float dy = cosf(driftT * 0.2f + seed * 1.5f) * 3.0f;
+            float dz = sinf(driftT * 0.25f + seed * 0.7f) * 5.0f;
+
+            glm::vec3 dpos(cosf(angle) * dist + dx, y + dy, sinf(angle) * dist + dz);
+            float dsize = 1.0f + fmodf(seed * 3.1f, 4.0f);
+
+            // Dim blue-purple color
+            float hv = fmodf(seed * 0.1f, 1.0f);
+            glm::vec3 dmColor;
+            if (hv < 0.4f) dmColor = glm::vec3(0.15f, 0.12f, 0.3f);      // Dark purple
+            else if (hv < 0.7f) dmColor = glm::vec3(0.1f, 0.15f, 0.25f);  // Dark blue
+            else dmColor = glm::vec3(0.12f, 0.1f, 0.18f);                   // Deep indigo
+
+            float dmAlpha = 0.04f + sinf(driftT * 0.5f) * 0.015f;
+            dmAlpha += audioGlow * 0.5f;
+            app.billboard.draw(dpos, glm::vec4(dmColor, dmAlpha), dsize);
+        }
     }
 
     // --- Star rendering ---
@@ -1092,234 +1204,214 @@ void renderScene(App& app) {
 
     for (auto& n : app.artistNodes) {
         if (n.isSelected) {
-            // SELECTED STAR: bright sphere with tight contained glow
+            // SELECTED STAR: bright colored sphere + massive glow corona
             float starSize = n.radius * 0.35f;
-
-            // Star sphere with starCore texture - the MAIN bright element
-            // Star: PROCEDURAL BURNING PLASMA surface
             float pulse = 1.0f + app.audioWave * 0.1f;
             float coreSize = starSize * 0.8f * pulse;
-            app.starShader.use();
-            app.starShader.setMat4("uView", glm::value_ptr(view));
-            app.starShader.setMat4("uProjection", glm::value_ptr(proj));
-            app.starShader.setFloat("uTime", app.elapsedTime);
+
+            // Artist color is DOMINANT -- each star has its unique vibrant hue
+            glm::vec3 starColor = n.color;
+            glm::vec3 brightColor = glm::mix(starColor, glm::vec3(1.0f), 0.3f);
+
+            // Bright colored sphere using planet shader (guaranteed to work on all GPUs)
             glBindTexture(GL_TEXTURE_2D, app.texStarCore);
             glm::mat4 m = glm::translate(glm::mat4(1.0f), n.pos);
-            m = glm::rotate(m, app.elapsedTime * 0.1f, glm::vec3(0.05f, 1, 0));
+            m = glm::rotate(m, app.elapsedTime * 0.15f, glm::vec3(0.05f, 1, 0));
             m = glm::scale(m, glm::vec3(coreSize));
-            app.starShader.setMat4("uModel", glm::value_ptr(m));
-            // Each star gets a UNIQUE color mix based on artist
-            glm::vec3 starColor = glm::mix(n.color, glm::vec3(1.0f, 0.95f, 0.85f), 0.35f);
-            app.starShader.setVec3("uColor", starColor.r, starColor.g, starColor.b);
-            // Pass artist hue to shader for unique plasma palette
-            app.starShader.setVec3("uEmissive", n.color.r * 0.6f, n.color.g * 0.5f, n.color.b * 0.4f);
-            app.starShader.setFloat("uEmissiveStrength", 0.6f + app.audioWave * 0.5f);
+            app.planetShader.setMat4("uModel", glm::value_ptr(m));
+            // Color the sphere with the artist's color, bright
+            app.planetShader.setVec3("uColor", brightColor.r, brightColor.g, brightColor.b);
+            // High emissive = self-luminous, no dark side
+            app.planetShader.setVec3("uEmissive", brightColor.r, brightColor.g, brightColor.b);
+            app.planetShader.setFloat("uEmissiveStrength", 0.85f + app.audioWave * 0.15f);
+            app.planetShader.setVec3("uLightPos", n.pos.x, n.pos.y, n.pos.z);
             app.sphereHi.draw();
-            // Switch back to planet shader for rest of scene
-            app.planetShader.use();
-            app.planetShader.setMat4("uView", glm::value_ptr(view));
-            app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
 
-            // Smooth glow halo -- pulses with audio
+            // === MASSIVE GLOW CORONA ===
+            // THIS is what creates the "flame" look -- multiple layered billboard
+            // glows around the sphere, using the starGlow texture's soft falloff
             glDepthMask(GL_FALSE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);
             app.billboardShader.use();
             app.billboardShader.setMat4("uView", glm::value_ptr(view));
             app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
             glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-            float glowPulse = 0.06f + app.audioWave * 0.04f;
-            app.billboard.draw(n.pos, glm::vec4(starColor * 0.5f, glowPulse), coreSize * 2.5f);
-            // Audio-reactive gravity waves -- concentric expanding rings
+
+            float aPulse = 1.0f + app.audioWave * 0.2f;
+
+            // Layer 1: Inner bright glow - white-hot, tight around sphere
+            app.billboard.draw(n.pos,
+                glm::vec4(brightColor * 0.9f + glm::vec3(0.1f), 0.45f * aPulse),
+                coreSize * 3.5f);
+
+            // Layer 2: Mid corona - artist-colored, the main visible flame halo
+            app.billboard.draw(n.pos,
+                glm::vec4(brightColor, 0.3f * aPulse),
+                coreSize * 6.0f);
+
+            // Layer 3: Outer corona - rich artist color, wide
+            app.billboard.draw(n.pos,
+                glm::vec4(starColor * 0.8f, 0.15f * aPulse),
+                coreSize * 10.0f);
+
+            // Layer 4: Outermost atmosphere - faint, very wide
+            app.billboard.draw(n.pos,
+                glm::vec4(starColor * 0.5f, 0.06f * aPulse),
+                coreSize * 15.0f);
+
+            // Offset glows for irregular flame edges (breaks the perfect circle)
+            for (int gi = 0; gi < 8; gi++) {
+                float seed = (float)gi * 137.508f + n.hue * 50.0f;
+                float gAngle = app.elapsedTime * 0.06f + seed;
+                float gOffset = coreSize * (0.5f + sinf(gAngle * 0.7f) * 0.3f);
+                glm::vec3 gPos = n.pos + glm::vec3(
+                    cosf(seed * 2.4f) * gOffset,
+                    sinf(seed * 1.6f) * gOffset * 0.5f,
+                    sinf(seed * 2.4f) * gOffset
+                );
+                float gSize = coreSize * (3.0f + sinf(gAngle) * 1.0f) * aPulse;
+                float gAlpha = 0.12f + sinf(gAngle * 1.5f) * 0.04f;
+                glm::vec3 gCol = glm::mix(brightColor, starColor, 0.5f);
+                app.billboard.draw(gPos, glm::vec4(gCol, gAlpha), gSize);
+            }
+
+            // === MASSIVE SOLAR FLARES - shoot outward on the beat ===
             if (app.audio.playing && app.playingArtist == app.selectedArtist) {
-                glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
-                for (int w = 0; w < 3; w++) {
-                    float waveT = fmodf(app.elapsedTime * 0.5f + (float)w * 1.0f, 3.0f) / 3.0f;
-                    float waveR = coreSize * (2.0f + waveT * 12.0f);
-                    float waveA = (1.0f - waveT) * 0.03f * app.audioWave;
-                    app.billboard.draw(n.pos,
-                        glm::vec4(starColor * 0.3f, waveA), waveR);
+
+                // Giant coronal mass ejections -- long streaming flares
+                glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
+                int numFlares = 8;
+                for (int fi = 0; fi < numFlares; fi++) {
+                    float seed = (float)fi * 137.508f + n.hue * 50.0f;
+
+                    // Each flare has its own beat phase -- they fire at different times
+                    float beatPhase = app.elapsedTime * (0.8f + (fi % 3) * 0.3f) + seed;
+                    float lifecycle = fmodf(beatPhase * 0.2f, 1.0f);
+
+                    // Sharp eruption driven by audio
+                    float eruptPower = powf(sinf(lifecycle * (float)M_PI), 2.0f);
+                    eruptPower *= app.audioBass; // Driven by BASS
+
+                    if (eruptPower < 0.03f) continue;
+
+                    // Direction from star surface (unique per flare)
+                    float theta = seed * 2.39996f;
+                    float phi = sinf(seed * 1.618f) * (float)M_PI;
+                    glm::vec3 dir(
+                        sinf(phi) * cosf(theta),
+                        sinf(phi) * sinf(theta) * 0.7f,
+                        cosf(phi)
+                    );
+
+                    // Stream of particles along the flare direction
+                    int streamLen = 8 + (int)(eruptPower * 12.0f);
+                    for (int si = 0; si < streamLen; si++) {
+                        float t = (float)si / (float)streamLen; // 0=base, 1=tip
+                        float dist = coreSize * (1.2f + t * eruptPower * 12.0f);
+
+                        // Slight curve (magnetic field lines)
+                        float curve = sinf(t * (float)M_PI) * coreSize * 0.5f;
+                        glm::vec3 perp(dir.z * 0.3f, fabsf(dir.x) * 0.2f, -dir.x * 0.3f);
+                        glm::vec3 flarePos = n.pos + dir * dist + perp * curve;
+
+                        // Size: thick at base, thin at tip
+                        float flareSize = coreSize * (0.5f + (1.0f - t) * 0.8f) * eruptPower;
+
+                        // Color: white-hot at base -> artist color -> darker at tip
+                        glm::vec3 flareCol;
+                        if (t < 0.3f)
+                            flareCol = glm::mix(glm::vec3(1.0f), brightColor, t / 0.3f);
+                        else
+                            flareCol = glm::mix(brightColor, starColor * 0.4f, (t - 0.3f) / 0.7f);
+
+                        float flareAlpha = (1.0f - t * 0.7f) * eruptPower * 0.2f;
+                        app.billboard.draw(flarePos, glm::vec4(flareCol, flareAlpha), flareSize);
+                    }
                 }
 
-                // SOLAR FLAME STREAKS -- elongated arcs reaching outward with the beat
-                // No circles -- these are LINE-based prominences and coronal arcs
-                int numFlames = 24;
-                for (int fi = 0; fi < numFlames; fi++) {
-                    float seed = (float)fi * 137.508f + n.hue * 50.0f;
-                    float beatSync = app.audioBass * 2.5f + app.audioWave * 2.0f;
-                    float phase = app.elapsedTime * (0.3f + (fi % 5) * 0.15f) + seed;
-                    float lifecycle = fmodf(phase * 0.2f, 1.0f);
-                    float erupt = sinf(lifecycle * (float)M_PI);
-                    erupt *= (0.15f + beatSync * 0.5f);
-                    
-                    if (erupt < 0.02f) continue;
-                    
-                    // Base direction on star surface
-                    float theta = seed * 2.39996f + sinf(app.elapsedTime * 0.2f + fi) * 0.4f;
-                    float phi2 = sinf(seed * 1.618f) * (float)M_PI;
-                    glm::vec3 baseDir(sinf(phi2)*cosf(theta), sinf(phi2)*sinf(theta)*0.7f, cosf(phi2));
-                    
-                    // Build a curved flame arc (10-20 segments)
-                    int segs = 10 + (int)(erupt * 10.0f);
-                    float reachDist = coreSize * (0.5f + erupt * 4.0f); // Further with beat!
-                    
-                    std::vector<float> flameVerts;
-                    for (int s = 0; s <= segs; s++) {
-                        float t = (float)s / (float)segs;
-                        // Arc curves outward then bends back (like real solar prominences)
-                        float outward = sinf(t * (float)M_PI) * reachDist;
-                        float lateral = sinf(t * (float)M_PI * 1.5f + seed) * reachDist * 0.3f;
-                        
-                        glm::vec3 tangent = glm::normalize(glm::cross(baseDir, glm::vec3(0,1,0) + glm::vec3(sinf(seed),0,cosf(seed))*0.3f));
-                        glm::vec3 pt = n.pos + baseDir * (coreSize + outward) + tangent * lateral;
-                        pt.y += sinf(t * (float)M_PI) * reachDist * 0.4f * sinf(seed * 2.0f);
-                        
-                        flameVerts.push_back(pt.x);
-                        flameVerts.push_back(pt.y);
-                        flameVerts.push_back(pt.z);
-                    }
-                    
-                    GLuint fvao, fvbo;
-                    glGenVertexArrays(1, &fvao); glGenBuffers(1, &fvbo);
-                    glBindVertexArray(fvao); glBindBuffer(GL_ARRAY_BUFFER, fvbo);
-                    glBufferData(GL_ARRAY_BUFFER, flameVerts.size()*sizeof(float), flameVerts.data(), GL_STREAM_DRAW);
-                    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3*sizeof(float), 0);
-                    glEnableVertexAttribArray(0);
-                    
-                    // Color based on distance: hot white base -> orange -> red tip
-                    glm::vec3 flameCol = glm::mix(glm::vec3(1.0f, 0.9f, 0.6f), n.color * 0.8f + glm::vec3(0.5f, 0.15f, 0.05f), 0.4f);
-                    float flameAlpha = erupt * 0.15f;
-                    
-                    app.ringShader.use();
-                    app.ringShader.setMat4("uView", glm::value_ptr(view));
-                    app.ringShader.setMat4("uProjection", glm::value_ptr(proj));
-                    glm::mat4 id2(1.0f);
-                    app.ringShader.setMat4("uModel", glm::value_ptr(id2));
-                    app.ringShader.setVec4("uColor", flameCol.r, flameCol.g, flameCol.b, flameAlpha);
-                    glLineWidth(2.0f);
-                    glDrawArrays(GL_LINE_STRIP, 0, segs + 1);
-                    glLineWidth(1.0f);
-                    
-                    glDeleteBuffers(1, &fvbo); glDeleteVertexArrays(1, &fvao);
-                }
-                
-                // Restore billboard shader + add soft flame glows along the streaks
-                app.billboardShader.use();
-                app.billboardShader.setMat4("uView", glm::value_ptr(view));
-                app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
-                
-                // Soft flame GLOWS at the tips of streaks (not circles -- elongated via multiple draws)
+                // Smaller rapid-fire prominence sparks
                 glBindTexture(GL_TEXTURE_2D, app.texParticle);
-                for (int fi = 0; fi < 16; fi++) {
-                    float seed = (float)fi * 137.508f + n.hue * 50.0f;
-                    float beatSync = app.audioBass * 2.5f + app.audioWave * 2.0f;
-                    float phase = app.elapsedTime * (0.3f + (fi % 5) * 0.15f) + seed;
-                    float lifecycle = fmodf(phase * 0.2f, 1.0f);
-                    float erupt = sinf(lifecycle * (float)M_PI) * (0.15f + beatSync * 0.5f);
-                    if (erupt < 0.03f) continue;
-                    
-                    float theta = seed * 2.39996f + sinf(app.elapsedTime * 0.2f) * 0.3f;
-                    float phi2 = sinf(seed * 1.618f) * (float)M_PI;
-                    glm::vec3 dir(sinf(phi2)*cosf(theta), sinf(phi2)*sinf(theta)*0.7f, cosf(phi2));
-                    
-                    // Trail of small glows creating a flame tongue
-                    float reachDist = coreSize * (0.3f + erupt * 3.0f);
-                    for (int p = 0; p < 5; p++) {
-                        float t = (float)p / 4.0f;
-                        float d = coreSize * 1.0f + t * reachDist;
-                        float s = coreSize * (0.08f + (1.0f-t) * 0.06f) * (0.5f + erupt);
-                        float a = erupt * 0.06f * (1.0f - t * 0.7f);
-                        glm::vec3 fp = n.pos + dir * d;
-                        fp += glm::vec3(sinf(seed+t*3.0f), cosf(seed*2.0f+t*2.0f), sinf(seed*3.0f+t)) * coreSize * 0.05f;
-                        glm::vec3 fc = glm::mix(glm::vec3(1.0f, 0.95f, 0.7f), n.color * 0.8f + glm::vec3(0.4f, 0.1f, 0.0f), t);
-                        app.billboard.draw(fp, glm::vec4(fc, a), s);
-                    }
+                for (int si = 0; si < 25; si++) {
+                    float seed = (float)si * 73.13f + n.hue * 30.0f;
+                    float sparkPhase = app.elapsedTime * (1.5f + (si % 5) * 0.5f) + seed;
+                    float sparkLife = fmodf(sparkPhase * 0.4f, 1.0f);
+                    float sparkPow = powf(sinf(sparkLife * (float)M_PI), 3.0f);
+                    sparkPow *= (0.2f + app.audioWave * 0.8f);
+
+                    if (sparkPow < 0.05f) continue;
+
+                    float theta = seed * 2.39996f + app.elapsedTime * 0.1f;
+                    float phi = sinf(seed * 1.618f) * (float)M_PI;
+                    glm::vec3 dir(sinf(phi)*cosf(theta), sinf(phi)*sinf(theta), cosf(phi));
+
+                    float dist = coreSize * (1.0f + sparkPow * 4.0f);
+                    glm::vec3 sparkPos = n.pos + dir * dist;
+                    float sparkSize = coreSize * (0.08f + sparkPow * 0.15f);
+
+                    glm::vec3 sparkCol = glm::mix(
+                        glm::vec3(1.0f, 0.95f, 0.8f), brightColor, sparkPow);
+                    float sparkAlpha = sparkPow * 0.2f;
+
+                    app.billboard.draw(sparkPos, glm::vec4(sparkCol, sparkAlpha), sparkSize);
                 }
-                
+
+                // === ORBITAL PARTICLES - atoms/protons orbiting the star ===
+                // Like electrons around a nucleus, driven by music
+                glBindTexture(GL_TEXTURE_2D, app.texParticle);
+                int numOrbitalParticles = 60;
+                for (int pi = 0; pi < numOrbitalParticles; pi++) {
+                    float seed = (float)pi * 137.508f + n.hue * 100.0f;
+
+                    // Multiple orbital shells at different radii
+                    int shell = pi % 5;
+                    float orbitR = coreSize * (2.5f + (float)shell * 1.8f);
+
+                    // Each particle has unique orbital plane and speed
+                    float orbitSpeed = (0.3f + (float)(pi % 7) * 0.1f);
+                    orbitSpeed *= (1.0f + app.audioWave * 0.3f); // Music speeds them up
+                    float orbitAngle = app.elapsedTime * orbitSpeed + seed;
+
+                    // Tilted orbital plane per particle
+                    float tiltA = sinf(seed * 0.618f) * 1.2f;
+                    float tiltB = cosf(seed * 0.314f) * 0.8f;
+
+                    float px = cosf(orbitAngle) * orbitR;
+                    float pz = sinf(orbitAngle) * orbitR;
+                    float py = px * sinf(tiltA) * 0.4f + pz * sinf(tiltB) * 0.3f;
+                    px *= cosf(tiltA * 0.3f);
+                    pz *= cosf(tiltB * 0.3f);
+
+                    glm::vec3 ppos = n.pos + glm::vec3(px, py, pz);
+                    float psize = coreSize * (0.03f + 0.02f * sinf(seed * 2.0f));
+
+                    // Bright cyan/white particles that pulse
+                    float pBright = 0.5f + 0.5f * sinf(app.elapsedTime * 2.0f + seed);
+                    pBright *= (0.5f + app.audioWave * 0.5f);
+                    glm::vec3 pcolor = glm::mix(
+                        glm::vec3(0.3f, 0.7f, 1.0f),  // Cyan
+                        glm::vec3(1.0f, 0.9f, 0.7f),   // Warm white
+                        sinf(seed) * 0.5f + 0.5f
+                    );
+
+                    app.billboard.draw(ppos, glm::vec4(pcolor, pBright * 0.15f), psize);
+                }
+
+                // === DARK MATTER RING - subtle ring of particles around the star system ===
                 glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-                
-                // === NEBULA GAS + GRAVITY LOOPS + WAVELENGTHS ===
-                
-                // Nebula gas clouds -- 8 unique colors
-                glm::vec3 nebColors[] = {
-                    glm::mix(n.color, glm::vec3(0.2f, 0.4f, 1.0f), 0.7f),
-                    glm::mix(n.color, glm::vec3(0.9f, 0.15f, 0.5f), 0.6f),
-                    glm::mix(n.color, glm::vec3(1.0f, 0.5f, 0.05f), 0.5f),
-                    glm::mix(n.color, glm::vec3(0.2f, 0.9f, 0.7f), 0.6f),
-                    glm::mix(n.color, glm::vec3(0.7f, 0.15f, 0.9f), 0.6f),
-                    glm::vec3(1.0f, 0.8f, 0.3f),
-                    glm::vec3(0.3f, 0.7f, 1.0f),
-                    glm::vec3(0.9f, 0.25f, 0.25f),
-                };
-                
-                glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-                // Gas jets -- shoot outward with bass
-                for (int gi = 0; gi < 16; gi++) {
-                    float ga = app.elapsedTime * (0.02f + gi * 0.006f) + (float)gi * 0.393f;
-                    float bassF = app.audioBass * 2.0f;
-                    float gasR = coreSize * (1.4f + sinf(ga * 1.8f + gi) * 0.6f + bassF * 1.2f);
-                    float gasY = sinf(ga * 0.5f + gi * 1.3f) * gasR * 0.5f;
-                    glm::vec3 gp = n.pos + glm::vec3(cosf(ga)*gasR, gasY, sinf(ga)*gasR);
-                    float gs = coreSize * (0.3f + app.audioBass * 0.5f);
-                    glm::vec3 gc = nebColors[gi % 8];
-                    float ga2 = 0.025f + app.audioWave * 0.025f;
-                    app.billboard.draw(gp, glm::vec4(gc, ga2), gs);
-                    // Trailing wisps
-                    glm::vec3 gp2 = gp + glm::vec3(sinf(ga)*coreSize*0.4f, coreSize*0.15f, cosf(ga)*coreSize*0.3f);
-                    app.billboard.draw(gp2, glm::vec4(gc * 0.6f, ga2 * 0.5f), gs * 0.6f);
-                }
-                
-                // GRAVITY LOOPS -- figure-8 / loop patterns driven by audio
-                glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
-                for (int li = 0; li < 2; li++) {
-                    float loopPhase = app.elapsedTime * 0.15f + (float)li * 1.571f;
-                    float loopR = coreSize * (2.5f + app.audioBass * 2.0f + li * 0.5f);
-                    int loopSegs = 40;
-                    std::vector<float> loopVerts;
-                    for (int s = 0; s <= loopSegs; s++) {
-                        float t = (float)s / (float)loopSegs * 2.0f * (float)M_PI;
-                        // Figure-8 / lemniscate-like path
-                        float r = loopR * (0.8f + 0.3f * sinf(t * 2.0f + loopPhase));
-                        float x = cosf(t + loopPhase) * r;
-                        float y = sinf(t * 2.0f + loopPhase * 0.7f) * loopR * 0.3f;
-                        float z = sinf(t + loopPhase) * r;
-                        loopVerts.push_back(n.pos.x + x);
-                        loopVerts.push_back(n.pos.y + y);
-                        loopVerts.push_back(n.pos.z + z);
-                    }
-                    GLuint lvao, lvbo;
-                    glGenVertexArrays(1, &lvao); glGenBuffers(1, &lvbo);
-                    glBindVertexArray(lvao); glBindBuffer(GL_ARRAY_BUFFER, lvbo);
-                    glBufferData(GL_ARRAY_BUFFER, loopVerts.size()*sizeof(float), loopVerts.data(), GL_STREAM_DRAW);
-                    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3*sizeof(float), 0);
-                    glEnableVertexAttribArray(0);
-                    app.ringShader.use();
-                    app.ringShader.setMat4("uView", glm::value_ptr(view));
-                    app.ringShader.setMat4("uProjection", glm::value_ptr(proj));
-                    glm::mat4 id(1.0f);
-                    app.ringShader.setMat4("uModel", glm::value_ptr(id));
-                    glm::vec3 lc = nebColors[li * 2];
-                    float la = 0.06f + app.audioWave * 0.04f;
-                    app.ringShader.setVec4("uColor", lc.r, lc.g, lc.b, la);
-                    glLineWidth(1.5f);
-                    glDrawArrays(GL_LINE_STRIP, 0, loopSegs + 1);
-                    glLineWidth(1.0f);
-                    glDeleteBuffers(1, &lvbo); glDeleteVertexArrays(1, &lvao);
-                    
-                    // Restore billboard shader for next effects
-                    app.billboardShader.use();
-                    app.billboardShader.setMat4("uView", glm::value_ptr(view));
-                    app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
-                    glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
-                }
-                
-                // AUDIO WAVELENGTH RINGS -- expanding rings with frequency
-                glBindTexture(GL_TEXTURE_2D, app.texAtmosphere);
-                for (int w = 0; w < 5; w++) {
-                    float wt = fmodf(app.elapsedTime * 0.4f + (float)w * 0.6f, 3.0f) / 3.0f;
-                    float wr = coreSize * (1.5f + wt * 20.0f * (0.5f + app.audioBass * 0.5f));
-                    float wa = (1.0f - wt) * 0.03f * (0.3f + app.audioWave * 0.7f);
-                    glm::vec3 wc = nebColors[(w + 3) % 8];
-                    app.billboard.draw(n.pos, glm::vec4(wc, wa), wr);
+                for (int dmi = 0; dmi < 30; dmi++) {
+                    float seed = (float)dmi * 11.7f + n.hue * 30.0f;
+                    float dmAngle = app.elapsedTime * 0.015f + seed * 0.5f;
+                    float dmR = coreSize * (8.0f + sinf(seed * 2.0f) * 3.0f);
+                    float dmY = sinf(dmAngle * 0.3f + seed) * coreSize * 1.5f;
+
+                    glm::vec3 dmPos = n.pos + glm::vec3(
+                        cosf(dmAngle) * dmR, dmY, sinf(dmAngle) * dmR);
+                    float dmSize = coreSize * (0.15f + sinf(seed * 3.0f) * 0.08f);
+
+                    glm::vec3 dmCol(0.12f, 0.1f, 0.22f); // Deep indigo
+                    float dmA = 0.025f + sinf(app.elapsedTime * 0.3f + seed) * 0.01f;
+                    dmA += app.audioWave * 0.01f;
+                    app.billboard.draw(dmPos, glm::vec4(dmCol, dmA), dmSize);
                 }
             }
             glDepthMask(GL_TRUE);
@@ -1425,17 +1517,25 @@ void renderScene(App& app) {
 
             // Cloud layer (semi-transparent, slightly larger, slower rotation)
             if (o.numTracks > 3) {
-                int cloudIdx = albumHash % 5; // pick one of the 5 cloud textures
-                // Use planetClouds textures
+                int cloudIdx = albumHash % 5;
                 glEnable(GL_BLEND);
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-                glBindTexture(GL_TEXTURE_2D, app.texSurface); // fallback for now
+                // Use actual cloud textures with per-planet variety
+                GLuint cloudTex = app.texPlanetClouds[cloudIdx];
+                glBindTexture(GL_TEXTURE_2D, cloudTex ? cloudTex : app.texSurface);
                 glm::mat4 cm = glm::translate(glm::mat4(1.0f), apos);
                 cm = glm::rotate(cm, app.elapsedTime * 0.08f + (float)ai * 2.0f,
                     glm::vec3(tiltX * 0.5f, 1.0f, tiltZ * 0.7f));
                 cm = glm::scale(cm, glm::vec3(o.planetSize * 1.02f));
                 app.planetShader.setMat4("uModel", glm::value_ptr(cm));
-                app.planetShader.setVec3("uColor", 0.5f, 0.5f, 0.55f);
+                // Varied cloud tints per planet for diversity
+                const glm::vec3 cloudTints[5] = {
+                    {0.7f, 0.7f, 0.78f}, {0.78f, 0.72f, 0.65f},
+                    {0.65f, 0.78f, 0.72f}, {0.72f, 0.65f, 0.78f},
+                    {0.8f, 0.77f, 0.72f}
+                };
+                glm::vec3 cc = cloudTints[cloudIdx];
+                app.planetShader.setVec3("uColor", cc.r, cc.g, cc.b);
                 app.planetShader.setVec3("uEmissive", 0.0f, 0.0f, 0.0f);
                 app.planetShader.setFloat("uEmissiveStrength", 0.0f);
                 app.sphereHi.draw();
@@ -1455,6 +1555,37 @@ void renderScene(App& app) {
                 o.planetSize * 2.5f);
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+            // Saturn-like rings for large albums (10+ tracks)
+            if (o.numTracks >= 10 && app.saturnRingShader.id) {
+                glDepthMask(GL_FALSE);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+                app.saturnRingShader.use();
+                app.saturnRingShader.setMat4("uView", glm::value_ptr(view));
+                app.saturnRingShader.setMat4("uProjection", glm::value_ptr(proj));
+
+                float ringScale = o.planetSize * 2.5f;
+                glm::mat4 rm = glm::translate(glm::mat4(1.0f), apos);
+                rm = glm::rotate(rm, tiltX * 0.7f, glm::vec3(1, 0, 0));
+                rm = glm::rotate(rm, tiltZ * 0.5f + 0.3f, glm::vec3(0, 0, 1));
+                rm = glm::scale(rm, glm::vec3(ringScale));
+
+                app.saturnRingShader.setMat4("uModel", glm::value_ptr(rm));
+                app.saturnRingShader.setVec3("uColor", planetColor.r * 0.9f, planetColor.g * 0.85f, planetColor.b * 0.8f);
+                app.saturnRingShader.setVec3("uLightPos", star.pos.x, star.pos.y, star.pos.z);
+                app.saturnRingShader.setFloat("uAlpha", 0.65f);
+                app.saturnRingShader.setFloat("uTime", app.elapsedTime);
+
+                app.ringDisc.draw();
+
+                glDepthMask(GL_TRUE);
+                // Restore planet shader
+                app.planetShader.use();
+                app.planetShader.setMat4("uView", glm::value_ptr(view));
+                app.planetShader.setMat4("uProjection", glm::value_ptr(proj));
+            }
 
             // Track moons -- only show when this album is selected
             if (ai == app.selectedAlbum) {
@@ -1664,16 +1795,124 @@ void renderMeteors(App& app) {
     }
 }
 
+// ============================================================
+// COMETS - long-tailed particles from galaxy edges
+// ============================================================
+void updateComets(App& app, float dt) {
+    if (app.artistNodes.empty()) return;
+
+    app.nextCometTime -= dt;
+    if (app.nextCometTime <= 0) {
+        app.nextCometTime = 12.0f + (float)(rand() % 100) / 10.0f; // 12-22 seconds
+
+        App::Comet c;
+        float angle = (float)(rand() % 1000) / 1000.0f * 2.0f * (float)M_PI;
+        float dist = 200.0f + (float)(rand() % 150);
+        float y = ((float)(rand() % 100) / 100.0f - 0.5f) * 100.0f;
+        c.pos = glm::vec3(cosf(angle) * dist, y, sinf(angle) * dist);
+
+        // Fly toward galaxy center with gentle curve
+        glm::vec3 target(
+            ((float)(rand() % 100) / 100.0f - 0.5f) * 60.0f,
+            ((float)(rand() % 100) / 100.0f - 0.5f) * 30.0f,
+            ((float)(rand() % 100) / 100.0f - 0.5f) * 60.0f
+        );
+        c.vel = glm::normalize(target - c.pos) * (5.0f + (float)(rand() % 60) / 10.0f);
+
+        // Perpendicular acceleration for curved path
+        glm::vec3 up(0, 1, 0);
+        glm::vec3 side = glm::cross(glm::normalize(c.vel), up);
+        if (glm::length(side) < 0.01f) side = glm::vec3(1, 0, 0);
+        side = glm::normalize(side);
+        c.accel = side * ((float)(rand() % 100) / 100.0f - 0.5f) * 0.4f;
+
+        // Icy comet colors
+        float hueVar = (float)(rand() % 100) / 100.0f;
+        if (hueVar < 0.4f) c.color = glm::vec3(0.6f, 0.85f, 1.0f);       // Blue-white
+        else if (hueVar < 0.7f) c.color = glm::vec3(0.4f, 0.9f, 0.85f);   // Cyan
+        else c.color = glm::vec3(0.8f, 0.7f, 1.0f);                        // Lavender
+
+        c.headSize = 0.3f + (float)(rand() % 100) / 200.0f;
+        c.maxLife = 15.0f + (float)(rand() % 100) / 10.0f;
+        c.life = c.maxLife;
+        app.comets.push_back(c);
+    }
+
+    // Update existing comets
+    for (auto& c : app.comets) {
+        c.tail.push_back(c.pos);
+        if (c.tail.size() > 80) c.tail.erase(c.tail.begin());
+        c.vel += c.accel * dt; // Curved path
+        c.pos += c.vel * dt;
+        c.life -= dt;
+    }
+
+    // Remove dead comets
+    app.comets.erase(
+        std::remove_if(app.comets.begin(), app.comets.end(),
+            [](const App::Comet& c) { return c.life <= 0; }),
+        app.comets.end()
+    );
+}
+
+void renderComets(App& app) {
+    if (app.comets.empty()) return;
+    glm::mat4 view = app.camera.viewMatrix();
+    glm::mat4 proj = app.camera.projMatrix();
+
+    glDepthMask(GL_FALSE);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+
+    app.billboardShader.use();
+    app.billboardShader.setMat4("uView", glm::value_ptr(view));
+    app.billboardShader.setMat4("uProjection", glm::value_ptr(proj));
+
+    for (auto& c : app.comets) {
+        float lifeA = std::min(c.life / c.maxLife, 1.0f) * std::min((c.maxLife - c.life) / 1.0f, 1.0f);
+
+        // Bright comet nucleus
+        glBindTexture(GL_TEXTURE_2D, app.texStarGlow);
+        app.billboard.draw(c.pos, glm::vec4(1.0f, 1.0f, 1.0f, lifeA * 0.7f), c.headSize * 2.0f);
+        app.billboard.draw(c.pos, glm::vec4(c.color, lifeA * 0.4f), c.headSize * 5.0f);
+
+        // Glowing tail particles
+        glBindTexture(GL_TEXTURE_2D, app.texParticle);
+        int tailLen = (int)c.tail.size();
+        for (int i = 0; i < tailLen; i++) {
+            float t = (float)i / (float)std::max(tailLen - 1, 1); // 0=oldest, 1=newest
+            float tailAlpha = t * lifeA * 0.25f;
+            float tailSize = c.headSize * (0.15f + t * 0.85f);
+            // Color shifts from warm at tail end to cool at head
+            glm::vec3 tailColor = glm::mix(glm::vec3(0.8f, 0.4f, 0.2f), c.color, t);
+            // Render every other point for performance, but always render near head
+            if (i % 2 == 0 || i > tailLen - 10)
+                app.billboard.draw(c.tail[i], glm::vec4(tailColor, tailAlpha), tailSize);
+        }
+    }
+
+    glDepthMask(GL_TRUE);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+}
+
 void render(App& app) {
-    // Render directly to screen -- no bloom (bloom was causing whiteout)
-    // The original Planetary used additive-blended sprites for glows,
-    // not screen-space bloom. The additive glows on a dark background
-    // create the luminous look naturally.
+    // Direct to screen -- no FBO, no post-process (keeps GL state clean for ImGui/search)
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, app.screenW, app.screenH);
     glClearColor(0.0f, 0.0f, 0.005f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
     renderScene(app);
+    renderMeteors(app);
+    renderComets(app);
+
+    // Clean GL state for ImGui
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDepthMask(GL_TRUE);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glActiveTexture(GL_TEXTURE0);
+    glUseProgram(0);
 }
 
 // ============================================================
@@ -1700,12 +1939,15 @@ void renderLabels(App& app) {
 
         std::string upperName = toUpper(n.name);
         const char* name = upperName.c_str();
-        ImVec2 textSize = ImGui::CalcTextSize(name);
+        // Large font for artist names
+        ImFont* nf = app.fontLarge ? app.fontLarge : ImGui::GetFont();
+        float nfs = app.fontLarge ? 28.0f : ImGui::GetFontSize();
+        ImVec2 textSize = nf->CalcTextSizeA(nfs, FLT_MAX, 0.0f, name);
         ImVec2 pos(sp.x - textSize.x * 0.5f, sp.y - textSize.y - 4);
 
         // Shadow for readability
-        dl->AddText(ImVec2(pos.x + 1, pos.y + 1), shadow, name);
-        dl->AddText(pos, col, name);
+        dl->AddText(nf, nfs, ImVec2(pos.x + 1, pos.y + 1), shadow, name);
+        dl->AddText(nf, nfs, pos, col, name);
     }
 
     // Album/track labels when zoomed in
@@ -1725,10 +1967,13 @@ void renderLabels(App& app) {
             ImU32 shadow = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, alpha * 0.6f));
 
             std::string albumUpper = toUpper(o.name);
-            ImVec2 ts = ImGui::CalcTextSize(albumUpper.c_str());
+            // Medium font for album names
+            ImFont* af = app.fontMedium ? app.fontMedium : ImGui::GetFont();
+            float afs = app.fontMedium ? 20.0f : ImGui::GetFontSize();
+            ImVec2 ts = af->CalcTextSizeA(afs, FLT_MAX, 0.0f, albumUpper.c_str());
             ImVec2 pos(sp.x - ts.x * 0.5f, sp.y - ts.y);
-            dl->AddText(ImVec2(pos.x + 1, pos.y + 1), shadow, albumUpper.c_str());
-            dl->AddText(pos, col, albumUpper.c_str());
+            dl->AddText(af, afs, ImVec2(pos.x + 1, pos.y + 1), shadow, albumUpper.c_str());
+            dl->AddText(af, afs, pos, col, albumUpper.c_str());
 
             // Track moon labels for selected album
             if (ai == app.selectedAlbum) {
@@ -1741,10 +1986,13 @@ void renderLabels(App& app) {
                     ImU32 tc = ImGui::ColorConvertFloat4ToU32(ImVec4(0.9f, 0.9f, 0.95f, 0.7f));
                     ImU32 ts2 = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, 0.5f));
                     std::string trackUpper = toUpper(t.name);
-                    ImVec2 tts = ImGui::CalcTextSize(trackUpper.c_str());
+                    // Small font for track names
+                    ImFont* tf = app.fontSmall ? app.fontSmall : ImGui::GetFont();
+                    float tfs = app.fontSmall ? 13.0f : ImGui::GetFontSize();
+                    ImVec2 tts = tf->CalcTextSizeA(tfs, FLT_MAX, 0.0f, trackUpper.c_str());
                     ImVec2 tp(msp.x - tts.x * 0.5f, msp.y - tts.y);
-                    dl->AddText(ImVec2(tp.x + 1, tp.y + 1), ts2, trackUpper.c_str());
-                    dl->AddText(tp, tc, trackUpper.c_str());
+                    dl->AddText(tf, tfs, ImVec2(tp.x + 1, tp.y + 1), ts2, trackUpper.c_str());
+                    dl->AddText(tf, tfs, tp, tc, trackUpper.c_str());
                 }
             }
         }
@@ -1783,16 +2031,14 @@ void renderUI(App& app) {
             app.scanProgress.load(), app.scanTotal.load());
     }
 
-    // Search with clickable results list
+    // Search with clickable results list -- ALWAYS works, even when zoomed into a star
     if (app.artistNodes.size() > 0) {
-        static char searchBuf[256] = "";
         ImGui::SetNextItemWidth(290);
-        ImGui::InputTextWithHint("##search", "Search artists...", searchBuf, sizeof(searchBuf));
-        app.searchQuery = searchBuf;
+        ImGui::InputTextWithHint("##search", "Search artists...", app.searchBuf, sizeof(app.searchBuf));
 
-        // Show clickable search results when searching
-        if (strlen(searchBuf) > 1) {
-            std::string q = searchBuf;
+        // Show results whenever there's text (no matter what level you're at)
+        if (strlen(app.searchBuf) > 1) {
+            std::string q = app.searchBuf;
             std::transform(q.begin(), q.end(), q.begin(), ::tolower);
             int shown = 0;
             for (int i = 0; i < (int)app.artistNodes.size() && shown < 15; i++) {
@@ -1800,7 +2046,7 @@ void renderUI(App& app) {
                 std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
                 if (lower.find(q) != std::string::npos) {
                     if (ImGui::Selectable(app.artistNodes[i].name.c_str(), false, 0, ImVec2(0, 20))) {
-                        // Click to navigate to this artist
+                        // Deselect current star, navigate to the searched one
                         if (app.selectedArtist >= 0) app.artistNodes[app.selectedArtist].isSelected = false;
                         app.selectedArtist = i;
                         app.selectedAlbum = -1;
@@ -1808,11 +2054,13 @@ void renderUI(App& app) {
                         app.currentLevel = G_ARTIST_LEVEL;
                         app.camera.autoRotate = false;
                         app.camera.flyTo(app.artistNodes[i].pos, app.artistNodes[i].idealCameraDist);
-                        searchBuf[0] = '\0'; // Clear search after selection
-                        app.searchQuery = "";
+                        app.searchBuf[0] = '\0'; // Clear search after selection
                     }
                     shown++;
                 }
+            }
+            if (shown == 0) {
+                ImGui::TextColored(ImVec4(0.5f, 0.4f, 0.4f, 0.7f), "No matches");
             }
         }
     }
@@ -1911,6 +2159,13 @@ void renderUI(App& app) {
         }
         ImGui::SameLine();
 
+        // Recenter button -- fly to now playing
+        if (ImGui::Button("@", ImVec2(30, 30))) {
+            recenterToNowPlaying(app);
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fly to now playing (L3)");
+        ImGui::SameLine();
+
         // Shuffle button -- plays a random track and spawns a meteor
         if (ImGui::Button("~", ImVec2(30, 30))) {
             if (!app.library.artists.empty()) {
@@ -2002,6 +2257,151 @@ void renderUI(App& app) {
         ImGui::End();
     }
 
+    // Virtual keyboard for controller search (R3 to toggle)
+    if (app.showVirtualKB) {
+        static const char* vkbRows[] = { "1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM" };
+        static const char* vkbSpecial[] = { "SPC", "DEL", "CLR", "GO" };
+        int numLetterRows = 4;
+
+        float kbW = 520, kbH = 300;
+        ImGui::SetNextWindowPos(ImVec2(app.screenW * 0.5f, app.screenH * 0.5f), 0, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(kbW, kbH));
+        ImGui::Begin("##vkb", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
+
+        // Search input display
+        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "SEARCH");
+        ImGui::SameLine();
+        std::string displayText = app.vkbInput + "_";
+        ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", displayText.c_str());
+
+        // Show matching results count
+        if (!app.vkbInput.empty()) {
+            std::string q = app.vkbInput;
+            std::transform(q.begin(), q.end(), q.begin(), ::tolower);
+            int matches = 0;
+            std::string firstMatch;
+            for (auto& n : app.artistNodes) {
+                std::string lower = n.name;
+                std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                if (lower.find(q) != std::string::npos) {
+                    if (matches == 0) firstMatch = n.name;
+                    matches++;
+                }
+            }
+            if (matches > 0) {
+                ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.5f, 0.9f), "%d matches - %s%s",
+                    matches, firstMatch.c_str(), matches > 1 ? " ..." : "");
+            } else {
+                ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.3f, 0.8f), "No matches");
+            }
+        }
+        ImGui::Spacing();
+
+        // Keyboard grid
+        float btnSize = 40.0f;
+        float btnPad = 4.0f;
+        for (int r = 0; r < numLetterRows; r++) {
+            int len = (int)strlen(vkbRows[r]);
+            // Center each row
+            float rowW = len * (btnSize + btnPad) - btnPad;
+            float indent = (kbW - 24 - rowW) * 0.5f;
+            if (indent > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + indent);
+
+            for (int c = 0; c < len; c++) {
+                bool selected = (app.vkbRow == r && app.vkbCol == c);
+                char label[4] = { vkbRows[r][c], '\0' };
+
+                if (selected) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.9f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f, 0.15f, 0.2f, 0.9f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.8f, 0.9f, 1));
+                }
+
+                if (ImGui::Button(label, ImVec2(btnSize, btnSize))) {
+                    // Mouse click on key
+                    app.vkbInput += vkbRows[r][c];
+                }
+                ImGui::PopStyleColor(2);
+
+                if (c < len - 1) ImGui::SameLine(0, btnPad);
+            }
+        }
+
+        // Special row
+        {
+            float specBtnW = 80.0f;
+            float rowW = 4 * (specBtnW + btnPad) - btnPad;
+            float indent = (kbW - 24 - rowW) * 0.5f;
+            if (indent > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + indent);
+
+            ImVec4 specColors[4] = {
+                {0.15f, 0.2f, 0.3f, 0.9f},  // SPC
+                {0.3f, 0.15f, 0.15f, 0.9f},  // DEL
+                {0.3f, 0.2f, 0.1f, 0.9f},    // CLR
+                {0.1f, 0.35f, 0.2f, 0.9f}    // GO
+            };
+            for (int c = 0; c < 4; c++) {
+                bool selected = (app.vkbRow == 4 && app.vkbCol == c);
+                if (selected) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.9f, 1.0f));
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Button, specColors[c]);
+                }
+
+                if (ImGui::Button(vkbSpecial[c], ImVec2(specBtnW, btnSize))) {
+                    // Mouse click on special key
+                    if (c == 0) app.vkbInput += ' ';
+                    else if (c == 1 && !app.vkbInput.empty()) app.vkbInput.pop_back();
+                    else if (c == 2) app.vkbInput.clear();
+                    else if (c == 3) {
+                        // GO - search: copy vkb input into the search buffer
+                        strncpy(app.searchBuf, app.vkbInput.c_str(), sizeof(app.searchBuf) - 1);
+                        app.searchBuf[sizeof(app.searchBuf) - 1] = '\0';
+                        if (!app.vkbInput.empty()) {
+                            std::string q = app.vkbInput;
+                            std::transform(q.begin(), q.end(), q.begin(), ::tolower);
+                            for (int i = 0; i < (int)app.artistNodes.size(); i++) {
+                                std::string lower = app.artistNodes[i].name;
+                                std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                                if (lower.find(q) != std::string::npos) {
+                                    if (app.selectedArtist >= 0)
+                                        app.artistNodes[app.selectedArtist].isSelected = false;
+                                    app.selectedArtist = i;
+                                    app.selectedAlbum = -1;
+                                    app.artistNodes[i].isSelected = true;
+                                    app.currentLevel = G_ARTIST_LEVEL;
+                                    app.camera.autoRotate = false;
+                                    app.camera.flyTo(app.artistNodes[i].pos,
+                                        app.artistNodes[i].idealCameraDist);
+                                    break;
+                                }
+                            }
+                        }
+                        app.showVirtualKB = false;
+                    }
+                }
+                ImGui::PopStyleColor(1);
+                if (c < 3) ImGui::SameLine(0, btnPad);
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.4f, 0.5f, 0.6f, 0.6f), "D-pad:move  A:type  B:back  R3:close");
+        ImGui::End();
+    }
+
+    // Controller hints (bottom-right, only when controller connected)
+    if (app.controller && !app.showVirtualKB) {
+        ImGui::SetNextWindowPos(ImVec2((float)app.screenW - 10, (float)app.screenH - 70), 0, ImVec2(1.0f, 1.0f));
+        ImGui::Begin("##ctrlhints", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs);
+        ImGui::TextColored(ImVec4(0.35f, 0.45f, 0.55f, 0.5f), "L3:Now Playing  R3:Search  LB/RB:Tracks");
+        ImGui::End();
+    }
+
     // GPU info (bottom right)
     ImGui::SetNextWindowPos(ImVec2((float)app.screenW - 10, 10), 0, ImVec2(1.0f, 0.0f));
     ImGui::Begin("##gpu", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -2028,21 +2428,15 @@ int hitTestStar(App& app, int mx, int my) {
     float bestDist = 999999; int bestIdx = -1;
     for (int i = 0; i < (int)app.artistNodes.size(); i++) {
         auto& n = app.artistNodes[i];
-        // Filter by search
-        if (!app.searchQuery.empty()) {
-            std::string lower = n.name;
-            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-            std::string q = app.searchQuery;
-            std::transform(q.begin(), q.end(), q.begin(), ::tolower);
-            if (lower.find(q) == std::string::npos) continue;
-        }
+        // No search filter here -- all stars are always clickable
+        // Search only affects the dropdown results in the sidebar
         glm::vec4 clip = proj * view * glm::vec4(n.pos, 1);
         if (clip.w <= 0) continue;
         glm::vec3 ndc = glm::vec3(clip) / clip.w;
         float sx = (ndc.x * 0.5f + 0.5f) * app.screenW;
         float sy = (1.0f - (ndc.y * 0.5f + 0.5f)) * app.screenH;
         float d = sqrtf((sx-mx)*(sx-mx) + (sy-my)*(sy-my));
-        float hitR = std::max(20.0f, n.glowRadius * 5.0f / std::max(clip.w * 0.1f, 0.1f));
+        float hitR = std::max(25.0f, n.glowRadius * 5.0f / std::max(clip.w * 0.1f, 0.1f));
         if (d < hitR && d < bestDist) { bestDist = d; bestIdx = i; }
     }
     return bestIdx;
@@ -2063,13 +2457,13 @@ HitResult hitTestPlanetMoon(App& app, int mx, int my) {
         float angle = o.angle + app.elapsedTime * o.speed;
         glm::vec3 apos = star.pos + glm::vec3(cosf(angle)*o.radius, 0, sinf(angle)*o.radius);
 
-        // Test planet
+        // Test planet (generous hit area for easier clicking)
         glm::vec2 sp = worldToScreen(vp, apos, app.screenW, app.screenH);
         float d = sqrtf((sp.x-mx)*(sp.x-mx) + (sp.y-my)*(sp.y-my));
-        float hitR = std::max(25.0f, o.planetSize * 80.0f);
+        float hitR = std::max(35.0f, o.planetSize * 100.0f);
         if (d < hitR && d < bestDist) { bestDist = d; result = {ai, -1}; }
 
-        // Test track moons (only for selected album)
+        // Test track moons (only for selected album, larger hit area)
         if (ai == app.selectedAlbum) {
             for (int ti = 0; ti < (int)o.tracks.size(); ti++) {
                 auto& t = o.tracks[ti];
@@ -2077,12 +2471,53 @@ HitResult hitTestPlanetMoon(App& app, int mx, int my) {
                 glm::vec3 mp = getMoonPos(apos, t.radius, ta, t.tiltX, t.tiltZ);
                 glm::vec2 msp = worldToScreen(vp, mp, app.screenW, app.screenH);
                 float md = sqrtf((msp.x-mx)*(msp.x-mx) + (msp.y-my)*(msp.y-my));
-                float mhitR = std::max(20.0f, t.size * 120.0f);
+                float mhitR = std::max(35.0f, t.size * 180.0f);
                 if (md < mhitR && md < bestDist) { bestDist = md; result = {ai, ti}; }
             }
         }
     }
     return result;
+}
+
+// ============================================================
+// RECENTER TO NOW PLAYING - fly camera to the currently playing track
+// ============================================================
+void recenterToNowPlaying(App& app) {
+    if (app.playingArtist < 0 || app.playingArtist >= (int)app.artistNodes.size()) return;
+
+    auto& star = app.artistNodes[app.playingArtist];
+
+    // Deselect current star
+    if (app.selectedArtist >= 0 && app.selectedArtist < (int)app.artistNodes.size())
+        app.artistNodes[app.selectedArtist].isSelected = false;
+
+    // Select the playing artist
+    app.selectedArtist = app.playingArtist;
+    star.isSelected = true;
+    app.selectedAlbum = app.playingAlbum;
+    app.currentLevel = G_TRACK_LEVEL;
+    app.camera.autoRotate = false;
+    app.searchBuf[0] = '\0';
+
+    // Compute the playing moon's current position and fly there
+    if (app.playingAlbum >= 0 && app.playingAlbum < (int)star.albumOrbits.size()) {
+        auto& album = star.albumOrbits[app.playingAlbum];
+        float a = album.angle + app.elapsedTime * album.speed;
+        glm::vec3 apos = star.pos + glm::vec3(cosf(a)*album.radius, 0, sinf(a)*album.radius);
+
+        if (app.playingTrack >= 0 && app.playingTrack < (int)album.tracks.size()) {
+            auto& track = album.tracks[app.playingTrack];
+            float ta = track.angle + app.elapsedTime * track.speed;
+            glm::vec3 mpos = getMoonPos(apos, track.radius, ta, track.tiltX, track.tiltZ);
+            app.camera.flyTo(mpos, track.radius * 4.0f + 0.5f);
+        } else {
+            float outerTrack = album.tracks.empty() ? album.planetSize * 5.0f :
+                album.tracks.back().radius * 2.5f;
+            app.camera.flyTo(apos, std::max(outerTrack, 2.0f));
+        }
+    } else {
+        app.camera.flyTo(star.pos, star.idealCameraDist);
+    }
 }
 
 // ============================================================
@@ -2155,6 +2590,8 @@ void handleEvents(App& app) {
                     } else {
                         int hit = hitTestStar(app, mx, my);
                         if (hit >= 0) {
+                            // Clear search when clicking a star directly
+                            app.searchBuf[0] = '\0';
                             if (app.selectedArtist >= 0) app.artistNodes[app.selectedArtist].isSelected = false;
                             if (hit == app.selectedArtist) {
                                 app.selectedArtist = -1; app.selectedAlbum = -1;
@@ -2201,6 +2638,7 @@ void handleEvents(App& app) {
                     } else { app.running = false; }
                 }
                 if (ev.key.keysym.sym == SDLK_SPACE) app.audio.togglePause();
+                if (ev.key.keysym.sym == SDLK_n) recenterToNowPlaying(app);
             }
             break;
         case SDL_DROPFILE: {
@@ -2219,8 +2657,45 @@ void handleEvents(App& app) {
         }
         case SDL_CONTROLLERBUTTONDOWN:
             if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_A) {
-                // A button = select/play (like left click)
-                // TODO: raycast from screen center
+                // A button = select (like left click at screen center)
+                int cx = app.screenW / 2, cy = app.screenH / 2;
+                if (app.selectedArtist >= 0) {
+                    // At star level: try to select a planet or moon
+                    HitResult pmHit = hitTestPlanetMoon(app, cx, cy);
+                    if (pmHit.track >= 0 && pmHit.album >= 0) {
+                        auto& star = app.artistNodes[app.selectedArtist];
+                        auto& album = star.albumOrbits[pmHit.album];
+                        auto& track = album.tracks[pmHit.track];
+                        app.audio.play(track.filePath, track.name, star.name, album.name, track.duration);
+                        app.playingArtist = app.selectedArtist;
+                        app.playingAlbum = pmHit.album;
+                        app.playingTrack = pmHit.track;
+                        app.currentLevel = G_TRACK_LEVEL;
+                    } else if (pmHit.album >= 0) {
+                        app.selectedAlbum = (app.selectedAlbum == pmHit.album) ? -1 : pmHit.album;
+                        app.currentLevel = (app.selectedAlbum >= 0) ? G_ALBUM_LEVEL : G_ARTIST_LEVEL;
+                        if (app.selectedAlbum >= 0) {
+                            auto& star = app.artistNodes[app.selectedArtist];
+                            auto& album = star.albumOrbits[app.selectedAlbum];
+                            float a = album.angle + app.elapsedTime * album.speed;
+                            glm::vec3 apos = star.pos + glm::vec3(cosf(a)*album.radius, 0, sinf(a)*album.radius);
+                            float outerTrack = album.tracks.empty() ? album.planetSize * 5.0f :
+                                album.tracks.back().radius * 2.5f;
+                            app.camera.flyTo(apos, std::max(outerTrack, 2.0f));
+                        }
+                    }
+                } else {
+                    // At galaxy level: select nearest visible star
+                    int hit = hitTestStar(app, cx, cy);
+                    if (hit >= 0) {
+                        app.selectedArtist = hit;
+                        app.selectedAlbum = -1;
+                        app.artistNodes[hit].isSelected = true;
+                        app.currentLevel = G_ARTIST_LEVEL;
+                        app.camera.autoRotate = false;
+                        app.camera.flyTo(app.artistNodes[hit].pos, app.artistNodes[hit].idealCameraDist);
+                    }
+                }
             }
             if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_B) {
                 // B button = back (like ESC)
@@ -2256,6 +2731,172 @@ void handleEvents(App& app) {
                         }
                     }
                 }
+            }
+            // L3 (click left stick) = recenter to now playing
+            if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSTICK) {
+                recenterToNowPlaying(app);
+            }
+            // R3 (click right stick) = toggle virtual keyboard for search
+            if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSTICK) {
+                app.showVirtualKB = !app.showVirtualKB;
+                if (app.showVirtualKB) {
+                    app.vkbRow = 1; app.vkbCol = 0;
+                    app.vkbInput = "";
+                }
+            }
+            // L/R bumpers = prev/next track
+            if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSHOULDER) {
+                if (app.playingArtist >= 0 && app.playingAlbum >= 0 && app.playingTrack > 0) {
+                    auto& star = app.artistNodes[app.playingArtist];
+                    auto& album = star.albumOrbits[app.playingAlbum];
+                    int prev = app.playingTrack - 1;
+                    auto& track = album.tracks[prev];
+                    app.audio.play(track.filePath, track.name, star.name, album.name, track.duration);
+                    app.playingTrack = prev;
+                }
+            }
+            if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) {
+                if (app.playingArtist >= 0 && app.playingAlbum >= 0) {
+                    auto& star = app.artistNodes[app.playingArtist];
+                    auto& album = star.albumOrbits[app.playingAlbum];
+                    int next = app.playingTrack + 1;
+                    if (next < (int)album.tracks.size()) {
+                        auto& track = album.tracks[next];
+                        app.audio.play(track.filePath, track.name, star.name, album.name, track.duration);
+                        app.playingTrack = next;
+                    }
+                }
+            }
+            // D-pad: virtual keyboard navigation OR album navigation
+            if (app.showVirtualKB) {
+                // Virtual keyboard layout rows
+                static const char* vkbLetters[] = {
+                    "1234567890",
+                    "QWERTYUIOP",
+                    "ASDFGHJKL",
+                    "ZXCVBNM",
+                    nullptr  // special row: SPC DEL CLR GO
+                };
+                int numRows = 5;
+                auto rowLen = [&](int r) -> int {
+                    if (r == 4) return 4; // special buttons
+                    return (int)strlen(vkbLetters[r]);
+                };
+
+                if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_UP) {
+                    app.vkbRow = std::max(0, app.vkbRow - 1);
+                    app.vkbCol = std::min(app.vkbCol, rowLen(app.vkbRow) - 1);
+                }
+                if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_DOWN) {
+                    app.vkbRow = std::min(numRows - 1, app.vkbRow + 1);
+                    app.vkbCol = std::min(app.vkbCol, rowLen(app.vkbRow) - 1);
+                }
+                if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_LEFT) {
+                    app.vkbCol = std::max(0, app.vkbCol - 1);
+                }
+                if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_RIGHT) {
+                    app.vkbCol = std::min(rowLen(app.vkbRow) - 1, app.vkbCol + 1);
+                }
+                // A = type selected key
+                if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_A) {
+                    if (app.vkbRow < 4) {
+                        // Letter/number key
+                        char c = vkbLetters[app.vkbRow][app.vkbCol];
+                        app.vkbInput += c;
+                    } else {
+                        // Special row
+                        switch (app.vkbCol) {
+                            case 0: app.vkbInput += ' '; break;  // SPACE
+                            case 1: // DELETE
+                                if (!app.vkbInput.empty()) app.vkbInput.pop_back();
+                                break;
+                            case 2: app.vkbInput.clear(); break;  // CLEAR
+                            case 3: // GO (search)
+                                strncpy(app.searchBuf, app.vkbInput.c_str(), sizeof(app.searchBuf) - 1);
+                                app.searchBuf[sizeof(app.searchBuf) - 1] = '\0';
+                                // Find first matching artist and navigate to it
+                                if (!app.vkbInput.empty()) {
+                                    std::string q = app.vkbInput;
+                                    std::transform(q.begin(), q.end(), q.begin(), ::tolower);
+                                    for (int i = 0; i < (int)app.artistNodes.size(); i++) {
+                                        std::string lower = app.artistNodes[i].name;
+                                        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                                        if (lower.find(q) != std::string::npos) {
+                                            if (app.selectedArtist >= 0)
+                                                app.artistNodes[app.selectedArtist].isSelected = false;
+                                            app.selectedArtist = i;
+                                            app.selectedAlbum = -1;
+                                            app.artistNodes[i].isSelected = true;
+                                            app.currentLevel = G_ARTIST_LEVEL;
+                                            app.camera.autoRotate = false;
+                                            app.camera.flyTo(app.artistNodes[i].pos,
+                                                app.artistNodes[i].idealCameraDist);
+                                            break;
+                                        }
+                                    }
+                                }
+                                app.showVirtualKB = false;
+                                break;
+                        }
+                    }
+                }
+                // B = backspace when in keyboard
+                if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_B) {
+                    if (!app.vkbInput.empty())
+                        app.vkbInput.pop_back();
+                    else
+                        app.showVirtualKB = false; // Close if empty
+                }
+            } else {
+                // Normal D-pad: navigate albums/tracks
+                if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_UP) {
+                    if (app.selectedArtist >= 0 && app.selectedAlbum > 0) {
+                        app.selectedAlbum--;
+                        app.currentLevel = G_ALBUM_LEVEL;
+                    }
+                }
+                if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_DOWN) {
+                    if (app.selectedArtist >= 0) {
+                        auto& star = app.artistNodes[app.selectedArtist];
+                        if (app.selectedAlbum < (int)star.albumOrbits.size() - 1) {
+                            app.selectedAlbum++;
+                            app.currentLevel = G_ALBUM_LEVEL;
+                        }
+                    }
+                }
+            }
+            // Start = toggle auto-rotate
+            if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_START) {
+                app.camera.autoRotate = !app.camera.autoRotate;
+            }
+            // Guide/Home = toggle auto-rotate (Steam button)
+            if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_GUIDE) {
+                app.camera.autoRotate = !app.camera.autoRotate;
+            }
+            // Back/Select = return to galaxy
+            if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_BACK) {
+                if (app.selectedArtist >= 0) app.artistNodes[app.selectedArtist].isSelected = false;
+                app.selectedArtist = -1;
+                app.selectedAlbum = -1;
+                app.currentLevel = G_ALPHA_LEVEL;
+                app.camera.autoRotate = true;
+                float maxR = 0;
+                for (auto& n : app.artistNodes) maxR = std::max(maxR, glm::length(n.pos));
+                app.camera.flyTo(glm::vec3(0), maxR * 1.5f);
+            }
+            break;
+        case SDL_CONTROLLERDEVICEREMOVED:
+            if (app.controller) {
+                SDL_GameControllerClose(app.controller);
+                app.controller = nullptr;
+                std::cout << "[Controller] Disconnected" << std::endl;
+            }
+            break;
+        case SDL_CONTROLLERDEVICEADDED:
+            if (!app.controller && SDL_IsGameController(ev.cdevice.which)) {
+                app.controller = SDL_GameControllerOpen(ev.cdevice.which);
+                if (app.controller)
+                    std::cout << "[Controller] Connected: " << SDL_GameControllerName(app.controller) << std::endl;
             }
             break;
         }
@@ -2316,7 +2957,20 @@ int main(int argc, char* argv[]) {
         // Audio analysis for reactive visuals
         updateAudioAnalysis(app, dt);
 
-        // Gamepad input (PS5/Xbox controller via SDL2)
+        // Gamepad input (PS5/Xbox/Steam controller via SDL2)
+        // Hot-plug: reconnect if controller was disconnected
+        if (!app.controller) {
+            for (int i = 0; i < SDL_NumJoysticks(); i++) {
+                if (SDL_IsGameController(i)) {
+                    app.controller = SDL_GameControllerOpen(i);
+                    if (app.controller) {
+                        std::cout << "[Controller] Connected: " << SDL_GameControllerName(app.controller) << std::endl;
+                        break;
+                    }
+                }
+            }
+        }
+
         if (app.controller) {
             float lx = SDL_GameControllerGetAxis(app.controller, SDL_CONTROLLER_AXIS_LEFTX) / 32768.0f;
             float ly = SDL_GameControllerGetAxis(app.controller, SDL_CONTROLLER_AXIS_LEFTY) / 32768.0f;
@@ -2325,8 +2979,25 @@ int main(int argc, char* argv[]) {
             float lt = SDL_GameControllerGetAxis(app.controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) / 32768.0f;
             float rt = SDL_GameControllerGetAxis(app.controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) / 32768.0f;
 
+            // Dead zone
+            if (fabsf(lx) < 0.15f) lx = 0;
+            if (fabsf(ly) < 0.15f) ly = 0;
+            if (fabsf(rx) < 0.12f) rx = 0;
+            if (fabsf(ry) < 0.12f) ry = 0;
+
+            // Left stick: pan camera target (navigate the galaxy)
+            if (lx != 0 || ly != 0) {
+                // Move camera target in the camera's local XZ plane
+                glm::vec3 forward = glm::normalize(app.camera.target - app.camera.position);
+                glm::vec3 right = glm::normalize(glm::cross(forward, app.camera.up));
+                glm::vec3 camUp = glm::normalize(glm::cross(right, forward));
+                float panSpeed = app.camera.orbitDist * 0.02f;
+                app.camera.targetLookAt += right * lx * panSpeed + camUp * (-ly) * panSpeed;
+                app.camera.autoRotate = false;
+            }
+
             // Right stick: orbit camera
-            if (fabsf(rx) > 0.1f || fabsf(ry) > 0.1f) {
+            if (rx != 0 || ry != 0) {
                 app.camera.onMouseDrag(rx * 8.0f, ry * 8.0f);
                 app.camera.autoRotate = false;
             }
@@ -2351,8 +3022,8 @@ int main(int argc, char* argv[]) {
 
         app.camera.update(dt);
         updateMeteors(app, dt);
-        render(app);
-        renderMeteors(app);
+        updateComets(app, dt);
+        render(app);     // includes renderScene + renderMeteors + renderComets + gravity ripple
         renderUI(app);   // also calls renderLabels inside ImGui frame
         SDL_GL_SwapWindow(app.window);
     }
