@@ -115,12 +115,13 @@ jobs:
       
       - name: Install dependencies
         run: |
-          brew install cmake sdl2 glew glm taglib
+          brew install cmake pkg-config sdl2 glew glm taglib
       
       - name: Build
         run: |
+          export PKG_CONFIG_PATH="$(brew --prefix sdl2)/lib/pkgconfig:$(brew --prefix glew)/lib/pkgconfig:$(brew --prefix taglib)/lib/pkgconfig:$PKG_CONFIG_PATH"
           mkdir build && cd build
-          cmake .. -DCMAKE_PREFIX_PATH="$(brew --prefix sdl2);$(brew --prefix glew);$(brew --prefix taglib)"
+          cmake ..
           make -j$(sysctl -n hw.ncpu)
       
       - name: Package
