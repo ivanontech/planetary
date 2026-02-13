@@ -3,3 +3,4 @@ build-win/
 win-deps/
 *.o
 .cache/
+releases/
