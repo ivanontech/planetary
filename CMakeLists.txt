@@ -80,6 +80,50 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
             "$<TARGET_FILE_DIR:planetary>/shaders"
     )
 
+elseif(APPLE)
+    # ===============================================
+    # macOS BUILD
+    # ===============================================
+    find_package(SDL2 REQUIRED)
+    find_package(GLEW REQUIRED)
+    find_package(OpenGL REQUIRED)
+    
+    # TagLib via pkg-config or Homebrew
+    find_package(PkgConfig)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(TAGLIB taglib)
+    endif()
+    if(NOT TAGLIB_FOUND)
+        # Fallback to Homebrew paths
+        set(TAGLIB_INCLUDE_DIRS "/opt/homebrew/include;/usr/local/include")
+        set(TAGLIB_LIBRARIES "-L/opt/homebrew/lib -L/usr/local/lib -ltag")
+    endif()
+
+    add_executable(planetary ${SOURCES})
+
+    target_include_directories(planetary PRIVATE
+        ${SDL2_INCLUDE_DIRS}
+        ${GLEW_INCLUDE_DIRS}
+        ${TAGLIB_INCLUDE_DIRS}
+        ${OPENGL_INCLUDE_DIR}
+        src/
+    )
+
+    target_link_libraries(planetary
+        SDL2::SDL2
+        GLEW::GLEW
+        ${TAGLIB_LIBRARIES}
+        ${OPENGL_LIBRARIES}
+    )
+
+    # macOS frameworks
+    target_link_libraries(planetary
+        "-framework OpenGL"
+        "-framework Cocoa"
+        "-framework IOKit"
+        "-framework CoreVideo"
+    )
+
 else()
     # ===============================================
     # LINUX BUILD (native)

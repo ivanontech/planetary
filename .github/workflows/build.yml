@@ -120,7 +120,7 @@ jobs:
       - name: Build
         run: |
           mkdir build && cd build
-          cmake ..
+          cmake .. -DCMAKE_PREFIX_PATH="$(brew --prefix sdl2);$(brew --prefix glew);$(brew --prefix taglib)"
           make -j$(sysctl -n hw.ncpu)
       
       - name: Package
@@ -129,11 +129,7 @@ jobs:
           cp build/planetary Planetary-macOS/
           cp -r resources Planetary-macOS/
           cp -r shaders Planetary-macOS/
-          cp README.md Planetary-macOS/
-          
-          # Copy dylibs
-          cp /usr/local/lib/libSDL2*.dylib Planetary-macOS/ 2>/dev/null || \
-          cp /opt/homebrew/lib/libSDL2*.dylib Planetary-macOS/ 2>/dev/null || true
+          cp README.md LICENSE Planetary-macOS/
           
           zip -r Planetary-macOS.zip Planetary-macOS
       
