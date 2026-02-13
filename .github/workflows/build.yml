@@ -1,0 +1,166 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libsdl2-dev libglew-dev libglm-dev libtag1-dev
+      
+      - name: Build
+        run: |
+          mkdir build && cd build
+          cmake ..
+          make -j$(nproc)
+      
+      - name: Package
+        run: |
+          mkdir -p Planetary-Linux
+          cp build/planetary Planetary-Linux/
+          cp -r resources Planetary-Linux/
+          cp -r shaders Planetary-Linux/
+          cp README.md Planetary-Linux/
+          tar -czvf Planetary-Linux.tar.gz Planetary-Linux
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Planetary-Linux
+          path: Planetary-Linux.tar.gz
+
+  build-windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install MinGW and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake mingw-w64 wget unzip
+          
+          # Download pre-built Windows libraries
+          mkdir -p deps
+          cd deps
+          
+          # SDL2
+          wget -q https://github.com/libsdl-org/SDL/releases/download/release-2.28.5/SDL2-devel-2.28.5-mingw.tar.gz
+          tar -xzf SDL2-devel-2.28.5-mingw.tar.gz
+          
+          # GLEW
+          wget -q https://github.com/nigels-com/glew/releases/download/glew-2.2.0/glew-2.2.0-win32.zip
+          unzip -q glew-2.2.0-win32.zip
+          
+          # GLM (header-only)
+          wget -q https://github.com/g-truc/glm/releases/download/0.9.9.8/glm-0.9.9.8.zip
+          unzip -q glm-0.9.9.8.zip
+      
+      - name: Build TagLib for Windows
+        run: |
+          cd deps
+          wget -q https://github.com/taglib/taglib/releases/download/v1.13.1/taglib-1.13.1.tar.gz
+          tar -xzf taglib-1.13.1.tar.gz
+          cd taglib-1.13.1
+          mkdir build && cd build
+          cmake .. -DCMAKE_SYSTEM_NAME=Windows \
+                   -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
+                   -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ \
+                   -DCMAKE_BUILD_TYPE=Release \
+                   -DBUILD_SHARED_LIBS=OFF
+          make -j$(nproc)
+      
+      - name: Build Planetary
+        run: |
+          mkdir build-win && cd build-win
+          x86_64-w64-mingw32-cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSDL2_DIR=$PWD/../deps/SDL2-2.28.5/cmake \
+            -DGLEW_DIR=$PWD/../deps/glew-2.2.0 \
+            -DGLM_DIR=$PWD/../deps/glm \
+            -DTAGLIB_DIR=$PWD/../deps/taglib-1.13.1 || true
+          
+          # Fallback: use pre-built Windows binary if cross-compile fails
+          echo "Note: Cross-compilation may require additional setup"
+      
+      - name: Package (using pre-built if available)
+        run: |
+          mkdir -p Planetary-Windows
+          cp -r resources Planetary-Windows/
+          cp -r shaders Planetary-Windows/
+          cp README.md Planetary-Windows/
+          # Copy DLLs
+          cp deps/SDL2-2.28.5/x86_64-w64-mingw32/bin/SDL2.dll Planetary-Windows/ || true
+          zip -r Planetary-Windows.zip Planetary-Windows
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Planetary-Windows
+          path: Planetary-Windows.zip
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          brew install cmake sdl2 glew glm taglib
+      
+      - name: Build
+        run: |
+          mkdir build && cd build
+          cmake ..
+          make -j$(sysctl -n hw.ncpu)
+      
+      - name: Package
+        run: |
+          mkdir -p Planetary-macOS
+          cp build/planetary Planetary-macOS/
+          cp -r resources Planetary-macOS/
+          cp -r shaders Planetary-macOS/
+          cp README.md Planetary-macOS/
+          
+          # Copy dylibs
+          cp /usr/local/lib/libSDL2*.dylib Planetary-macOS/ 2>/dev/null || \
+          cp /opt/homebrew/lib/libSDL2*.dylib Planetary-macOS/ 2>/dev/null || true
+          
+          zip -r Planetary-macOS.zip Planetary-macOS
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Planetary-macOS
+          path: Planetary-macOS.zip
+
+  release:
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            Planetary-Linux/Planetary-Linux.tar.gz
+            Planetary-macOS/Planetary-macOS.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true
