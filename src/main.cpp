@@ -1,10 +1,15 @@
 // ============================================================
-// PLANETARY - Native C++ / OpenGL
+// PLANETARY - Native C++ / OpenGL (+ OpenGL ES for Android)
 // Ported from the original Bloom Studio Planetary (Cinder/iOS)
 // Music scanning from the Electron version
+// Android TV / NVIDIA Shield port: streams from Navidrome (Subsonic API)
 // ============================================================
 
+#ifdef __ANDROID__
+#include <GLES3/gl3.h>
+#else
 #include <GL/glew.h>
+#endif
 #include <SDL2/SDL.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -27,12 +32,21 @@
 #include <mutex>
 #include <map>
 #include <fstream>
+#include <cstdlib>
 
 #include "stb_image.h"
 #include "shader.h"
 #include "camera.h"
 #include "music_data.h"
 #include "miniaudio.h"
+
+// Android-specific includes
+#ifdef __ANDROID__
+#include <android/log.h>
+#define ANDROID_LOG(msg) __android_log_print(ANDROID_LOG_DEBUG, "Planetary", "%s", (msg).c_str())
+#else
+#define ANDROID_LOG(msg)
+#endif
 
 // ============================================================
 // FORCE DISCRETE GPU (NVIDIA / AMD)
@@ -434,6 +448,18 @@ struct AudioPlayer {
     std::string currentArtist;
     std::string currentAlbum;
     float duration = 0;
+    bool castEnabled = false;
+    std::string castTarget = "Living Room";
+
+    static std::string shellEscapeSingleQuotes(const std::string& in) {
+        std::string out;
+        out.reserve(in.size() + 8);
+        for (char c : in) {
+            if (c == '\'') out += "'\\''";
+            else out.push_back(c);
+        }
+        return out;
+    }
 
     void init() {
         ma_engine_config config = ma_engine_config_init();
@@ -443,7 +469,13 @@ struct AudioPlayer {
         }
         engineInit = true;
         ma_engine_set_volume(&engine, volume);
-        std::cout << "[Audio] miniaudio engine ready (MP3/FLAC/WAV/OGG)" << std::endl;
+        const char* castEnv = std::getenv("PLANETARY_CAST");
+        const char* targetEnv = std::getenv("PLANETARY_CAST_TARGET");
+        castEnabled = (castEnv && std::string(castEnv) == "1");
+        if (targetEnv && std::string(targetEnv).size() > 0) castTarget = targetEnv;
+        std::cout << "[Audio] miniaudio engine ready (MP3/FLAC/WAV/OGG)";
+        if (castEnabled) std::cout << " | CAST MODE ON -> " << castTarget;
+        std::cout << std::endl;
     }
 
     void play(const std::string& path, const std::string& name, const std::string& artist, const std::string& album, float dur) {
@@ -461,10 +493,55 @@ struct AudioPlayer {
         currentAlbum = album;
         duration = dur;
 
+        if (castEnabled) {
+            std::string escapedPath = shellEscapeSingleQuotes(path);
+            std::string escapedTarget = shellEscapeSingleQuotes(castTarget);
+            std::string cmd = "/Users/kawkaw/.openclaw/workspace/.venv_music/bin/python /Users/kawkaw/.openclaw/workspace/scripts/planetary_cast_track.py --file '" + escapedPath + "' --target '" + escapedTarget + "' >/tmp/planetary_cast_track.log 2>&1 &";
+            int rc = std::system(cmd.c_str());
+            playing = (rc == 0);
+            std::cout << "[Audio] Cast: " << name << " by " << artist << " -> " << castTarget << std::endl;
+            return;
+        }
+
+#ifdef __ANDROID__
+        // Android: HTTP URLs from Navidrome need to be streamed
+        // Use SDL_RWops or download to temp file
+        // For simplicity: download to /data/local/tmp/planetary_current.mp3
+        if (path.substr(0, 4) == "http") {
+            std::string tempFile = "/data/local/tmp/planetary_stream.mp3";
+            // Download in background then play
+            // For now: use planetaryHttpGet from music_data.h to buffer the first 5MB
+            // and save to temp file, then init from file
+            // This is a blocking prefetch — runs in background thread
+            std::string response = planetaryHttpGet(path, 30);
+            if (response.empty()) {
+                __android_log_print(ANDROID_LOG_ERROR, "Planetary", "[Audio] HTTP stream failed: %s", path.c_str());
+                return;
+            }
+            // Write to temp file
+            FILE* f = fopen(tempFile.c_str(), "wb");
+            if (!f) {
+                __android_log_print(ANDROID_LOG_ERROR, "Planetary", "[Audio] Cannot write temp file");
+                return;
+            }
+            fwrite(response.data(), 1, response.size(), f);
+            fclose(f);
+            if (ma_sound_init_from_file(&engine, tempFile.c_str(), 0, nullptr, nullptr, &sound) != MA_SUCCESS) {
+                __android_log_print(ANDROID_LOG_ERROR, "Planetary", "[Audio] Failed to decode stream");
+                return;
+            }
+        } else {
+            if (ma_sound_init_from_file(&engine, path.c_str(), 0, nullptr, nullptr, &sound) != MA_SUCCESS) {
+                __android_log_print(ANDROID_LOG_ERROR, "Planetary", "[Audio] Failed to load: %s", path.c_str());
+                return;
+            }
+        }
+#else
         if (ma_sound_init_from_file(&engine, path.c_str(), 0, nullptr, nullptr, &sound) != MA_SUCCESS) {
             std::cerr << "[Audio] Failed to load: " << path << std::endl;
             return;
         }
+#endif
         soundInit = true;
         ma_sound_start(&sound);
         playing = true;
@@ -644,10 +721,18 @@ std::string loadConfig() {
     if (f.is_open()) {
         std::string musicPath;
         std::getline(f, musicPath);
+#ifdef __ANDROID__
+        // On Android, always use the Navidrome server URL
+        if (!musicPath.empty()) {
+            std::cout << "[Config] Loaded: " << musicPath << std::endl;
+            return musicPath;
+        }
+#else
         if (!musicPath.empty() && fs::is_directory(musicPath)) {
             std::cout << "[Config] Loaded: " << musicPath << std::endl;
             return musicPath;
         }
+#endif
     }
     return "";
 }
@@ -698,9 +783,15 @@ bool initSDL(App& app) {
     }
     initBasePath();
 
+#ifdef __ANDROID__
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+#else
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+#endif
     SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
     SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, 4);
 
@@ -718,8 +809,10 @@ bool initSDL(App& app) {
     SDL_GetWindowSize(app.window, &app.screenW, &app.screenH);
     app.camera.aspect = (float)app.screenW / (float)app.screenH;
 
+#ifndef __ANDROID__
     glewExperimental = GL_TRUE;
     if (glewInit() != GLEW_OK) { std::cerr << "GLEW init failed" << std::endl; return false; }
+#endif
 
     std::cout << "[Planetary] OpenGL " << glGetString(GL_VERSION) << std::endl;
     std::cout << "[Planetary] GPU: " << glGetString(GL_RENDERER) << std::endl;
@@ -763,7 +856,11 @@ bool initSDL(App& app) {
     style.Colors[ImGuiCol_Text] = ImVec4(0.8f, 0.9f, 1.0f, 1.0f);
 
     ImGui_ImplSDL2_InitForOpenGL(app.window, app.glContext);
+#ifdef __ANDROID__
+    ImGui_ImplOpenGL3_Init("#version 300 es");
+#else
     ImGui_ImplOpenGL3_Init("#version 330");
+#endif
 
     // Init audio
     app.audio.init();
@@ -838,20 +935,25 @@ void drawFullscreenQuad(App& app) {
 }
 
 bool initResources(App& app) {
-    if (!app.starPointShader.load(resolvePath("shaders/star_points.vert"), resolvePath("shaders/star_points.frag"))) return false;
-    if (!app.billboardShader.load(resolvePath("shaders/billboard.vert"), resolvePath("shaders/billboard.frag"))) return false;
-    if (!app.planetShader.load(resolvePath("shaders/planet.vert"), resolvePath("shaders/planet.frag"))) return false;
-    if (!app.ringShader.load(resolvePath("shaders/orbit_ring.vert"), resolvePath("shaders/orbit_ring.frag"))) return false;
-    if (!app.bloomBrightShader.load(resolvePath("shaders/fullscreen.vert"), resolvePath("shaders/bloom_bright.frag"))) return false;
-    if (!app.bloomBlurShader.load(resolvePath("shaders/fullscreen.vert"), resolvePath("shaders/bloom_blur.frag"))) return false;
-    if (!app.bloomCompositeShader.load(resolvePath("shaders/fullscreen.vert"), resolvePath("shaders/bloom_composite.frag"))) return false;
+#ifdef __ANDROID__
+    const std::string shaderDir = "shaders/es/";
+#else
+    const std::string shaderDir = "shaders/";
+#endif
+    if (!app.starPointShader.load(resolvePath(shaderDir+"star_points.vert"), resolvePath(shaderDir+"star_points.frag"))) return false;
+    if (!app.billboardShader.load(resolvePath(shaderDir+"billboard.vert"), resolvePath(shaderDir+"billboard.frag"))) return false;
+    if (!app.planetShader.load(resolvePath(shaderDir+"planet.vert"), resolvePath(shaderDir+"planet.frag"))) return false;
+    if (!app.ringShader.load(resolvePath(shaderDir+"orbit_ring.vert"), resolvePath(shaderDir+"orbit_ring.frag"))) return false;
+    if (!app.bloomBrightShader.load(resolvePath(shaderDir+"fullscreen.vert"), resolvePath(shaderDir+"bloom_bright.frag"))) return false;
+    if (!app.bloomBlurShader.load(resolvePath(shaderDir+"fullscreen.vert"), resolvePath(shaderDir+"bloom_blur.frag"))) return false;
+    if (!app.bloomCompositeShader.load(resolvePath(shaderDir+"fullscreen.vert"), resolvePath(shaderDir+"bloom_composite.frag"))) return false;
 
     // Procedural fire star shader (vertex displacement + turbulent fire)
-    app.starSurfaceShader.load(resolvePath("shaders/star.vert"), resolvePath("shaders/star.frag"));
+    app.starSurfaceShader.load(resolvePath(shaderDir+"star.vert"), resolvePath(shaderDir+"star.frag"));
     // Saturn-like ring shader for large albums
-    app.saturnRingShader.load(resolvePath("shaders/saturn_ring.vert"), resolvePath("shaders/saturn_ring.frag"));
+    app.saturnRingShader.load(resolvePath(shaderDir+"saturn_ring.vert"), resolvePath(shaderDir+"saturn_ring.frag"));
     // Gravity ripple post-process (bass-reactive space distortion)
-    app.gravityRippleShader.load(resolvePath("shaders/fullscreen.vert"), resolvePath("shaders/gravity_ripple.frag"));
+    app.gravityRippleShader.load(resolvePath(shaderDir+"fullscreen.vert"), resolvePath(shaderDir+"gravity_ripple.frag"));
 
     app.texStarGlow = loadTexture("resources/starGlow.png");
     app.texAtmosphere = loadTexture("resources/atmosphere.png");
@@ -881,8 +983,10 @@ bool initResources(App& app) {
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glEnable(GL_PROGRAM_POINT_SIZE);
-    glEnable(GL_MULTISAMPLE);
+#ifndef __ANDROID__
+    glEnable(GL_PROGRAM_POINT_SIZE);  // ES 3.0 always enables this
+    glEnable(GL_MULTISAMPLE);         // Not in ES 3.x
+#endif
     return true;
 }
 
@@ -2642,6 +2746,7 @@ void handleEvents(App& app) {
             }
             break;
         case SDL_DROPFILE: {
+#ifndef __ANDROID__
             char* path = ev.drop.file;
             if (fs::is_directory(path)) {
                 app.musicPath = path;
@@ -2653,6 +2758,7 @@ void handleEvents(App& app) {
                 }).detach();
             }
             SDL_free(path);
+#endif
             break;
         }
         case SDL_CONTROLLERBUTTONDOWN:
@@ -2927,6 +3033,18 @@ int main(int argc, char* argv[]) {
         std::cout << "[Planetary] Auto-loading saved library: " << savedPath << std::endl;
     }
 
+#ifdef __ANDROID__
+    // Android: Always load from Navidrome server (Mac Studio LAN IP)
+    if (app.musicPath.empty()) {
+        app.musicPath = "http://10.0.0.73:4533"; // Navidrome server
+    }
+    app.scanning = true;
+    std::thread([&app]() {
+        app.library = fetchMusicLibraryFromNavidrome(app.musicPath,
+            [&](int d, int t) { app.scanProgress = d; app.scanTotal = t; });
+        app.libraryLoaded = true; app.scanning = false;
+    }).detach();
+#else
     if (!app.musicPath.empty() && fs::is_directory(app.musicPath)) {
         app.scanning = true;
         std::thread([&app]() {
@@ -2935,6 +3053,7 @@ int main(int argc, char* argv[]) {
             app.libraryLoaded = true; app.scanning = false;
         }).detach();
     }
+#endif
 
     auto prev = std::chrono::high_resolution_clock::now();
     while (app.running) {

@@ -4,11 +4,12 @@
 #include <vector>
 #include <map>
 #include <algorithm>
-#include <filesystem>
 #include <functional>
 #include <cmath>
 #include <iostream>
 
+#ifndef __ANDROID__
+#include <filesystem>
 #include <taglib/fileref.h>
 #include <taglib/tag.h>
 #include <taglib/tpropertymap.h>
@@ -16,8 +17,8 @@
 #include <taglib/id3v2tag.h>
 #include <taglib/attachedpictureframe.h>
 #include <taglib/flacfile.h>
-
 namespace fs = std::filesystem;
+#endif
 
 // ============================================================
 // DATA STRUCTURES - mirroring the Electron version's types
@@ -25,6 +26,7 @@ namespace fs = std::filesystem;
 
 struct TrackData {
     std::string filePath;
+    std::string id;         // Navidrome track ID (Android streaming)
     std::string title;
     std::string artist;
     std::string album;
@@ -38,6 +40,7 @@ struct TrackData {
 struct AlbumData {
     std::string name;
     std::string artist;
+    std::string id;         // Navidrome album ID (for cover art URL)
     int year = 0;
     std::vector<TrackData> tracks;
     // Cover art (raw image data for GL texture creation)
@@ -60,7 +63,9 @@ struct MusicLibrary {
 
 // ============================================================
 // SCANNER - Port of the Electron version's music:scan IPC
+// (Desktop only — Android uses Navidrome HTTP API)
 // ============================================================
+#ifndef __ANDROID__
 
 static const std::vector<std::string> AUDIO_EXTENSIONS = {
     ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus",
@@ -230,3 +235,277 @@ inline MusicLibrary scanMusicLibrary(const std::string& dirPath,
               << lib.totalAlbums << " albums, " << lib.totalTracks << " tracks" << std::endl;
     return lib;
 }
+
+#endif // !__ANDROID__ (desktop scanner)
+
+// ============================================================
+// ANDROID: Fetch music library from Navidrome via Subsonic API
+// ============================================================
+#ifdef __ANDROID__
+
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <unistd.h>
+#include <android/log.h>
+
+#define PLANETARY_LOG(...) __android_log_print(ANDROID_LOG_DEBUG, "Planetary", __VA_ARGS__)
+
+// Simple HTTP GET (blocking, no SSL)
+static std::string planetaryHttpGet(const std::string& url, int timeoutSec = 10) {
+    std::string host, path;
+    int port = 80;
+
+    std::string u = url;
+    if (u.substr(0, 7) == "http://") u = u.substr(7);
+    auto slashPos = u.find('/');
+    std::string hostPort = (slashPos != std::string::npos) ? u.substr(0, slashPos) : u;
+    path = (slashPos != std::string::npos) ? u.substr(slashPos) : "/";
+    auto colonPos = hostPort.find(':');
+    if (colonPos != std::string::npos) {
+        host = hostPort.substr(0, colonPos);
+        port = std::stoi(hostPort.substr(colonPos + 1));
+    } else {
+        host = hostPort;
+    }
+
+    struct addrinfo hints = {}, *res;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    std::string portStr = std::to_string(port);
+    if (getaddrinfo(host.c_str(), portStr.c_str(), &hints, &res) != 0) {
+        PLANETARY_LOG("[HTTP] Failed to resolve host: %s", host.c_str());
+        return "";
+    }
+
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) { freeaddrinfo(res); return ""; }
+
+    struct timeval tv;
+    tv.tv_sec = timeoutSec;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
+        PLANETARY_LOG("[HTTP] Failed to connect to %s:%d", host.c_str(), port);
+        close(sock);
+        freeaddrinfo(res);
+        return "";
+    }
+    freeaddrinfo(res);
+
+    std::string req = "GET " + path + " HTTP/1.0\r\nHost: " + host + "\r\nConnection: close\r\n\r\n";
+    send(sock, req.c_str(), req.size(), 0);
+
+    std::string response;
+    char buf[4096];
+    ssize_t n;
+    while ((n = recv(sock, buf, sizeof(buf), 0)) > 0) {
+        response.append(buf, n);
+    }
+    close(sock);
+
+    auto headerEnd = response.find("\r\n\r\n");
+    if (headerEnd != std::string::npos) return response.substr(headerEnd + 4);
+    return response;
+}
+
+// Minimal JSON string extractor
+static std::string naviJsonStr(const std::string& json, const std::string& key) {
+    std::string search = "\"" + key + "\":\"";
+    auto pos = json.find(search);
+    if (pos == std::string::npos) {
+        // Try numeric value
+        search = "\"" + key + "\":";
+        pos = json.find(search);
+        if (pos == std::string::npos) return "";
+        pos += search.size();
+        auto end = json.find_first_of(",}", pos);
+        std::string val = json.substr(pos, end - pos);
+        if (!val.empty() && val[0] == '"') val = val.substr(1, val.size()-2);
+        return val;
+    }
+    pos += search.size();
+    auto end = pos;
+    while (end < json.size()) {
+        if (json[end] == '\\') { end += 2; continue; }
+        if (json[end] == '"') break;
+        end++;
+    }
+    return json.substr(pos, end - pos);
+}
+
+static int naviJsonInt(const std::string& json, const std::string& key, int def = 0) {
+    std::string s = naviJsonStr(json, key);
+    if (s.empty()) return def;
+    try { return std::stoi(s); } catch(...) { return def; }
+}
+
+static float naviJsonFloat(const std::string& json, const std::string& key, float def = 0.0f) {
+    std::string s = naviJsonStr(json, key);
+    if (s.empty()) return def;
+    try { return std::stof(s); } catch(...) { return def; }
+}
+
+static std::vector<std::string> naviJsonArray(const std::string& json, const std::string& arrayKey) {
+    std::vector<std::string> result;
+    std::string search = "\"" + arrayKey + "\":[";
+    auto pos = json.find(search);
+    if (pos == std::string::npos) return result;
+    pos += search.size();
+
+    int depth = 0;
+    bool inObj = false;
+    size_t objStart = 0;
+
+    while (pos < json.size()) {
+        char c = json[pos];
+        if (c == '{') {
+            if (!inObj) { inObj = true; objStart = pos; }
+            depth++;
+        } else if (c == '}') {
+            depth--;
+            if (depth == 0 && inObj) {
+                result.push_back(json.substr(objStart, pos - objStart + 1));
+                inObj = false;
+            }
+        } else if (c == ']' && depth == 0) {
+            break;
+        }
+        pos++;
+    }
+    return result;
+}
+
+// Navidrome connection settings (Mac Studio LAN IP)
+static const char* NAVI_BASE = "http://10.0.0.73:4533";
+static const char* NAVI_USER = "boss";
+static const char* NAVI_PASS = "planetary123";
+
+static std::string naviUrl(const std::string& endpoint, const std::string& params = "") {
+    std::string url = std::string(NAVI_BASE) + "/rest/" + endpoint + ".view"
+        + "?u=" + NAVI_USER
+        + "&p=" + NAVI_PASS
+        + "&v=1.16.1&c=planetary&f=json";
+    if (!params.empty()) url += "&" + params;
+    return url;
+}
+
+inline MusicLibrary fetchMusicLibraryFromNavidrome(
+    const std::string& /*serverUrl*/,
+    std::function<void(int,int)> progressCallback = nullptr
+) {
+    MusicLibrary lib;
+    PLANETARY_LOG("[Planetary] Connecting to Navidrome at %s", NAVI_BASE);
+
+    std::string artistsJson = planetaryHttpGet(naviUrl("getArtists"));
+    if (artistsJson.empty()) {
+        PLANETARY_LOG("[Planetary] Failed to reach Navidrome, using demo library");
+        ArtistData demo;
+        demo.name = "Navidrome Offline";
+        demo.primaryGenre = "Electronic";
+        AlbumData alb;
+        alb.name = "Demo Album";
+        alb.artist = demo.name;
+        TrackData trk;
+        trk.title = "Connect to Navidrome";
+        trk.artist = demo.name;
+        trk.album = alb.name;
+        trk.duration = 240.0f;
+        alb.tracks.push_back(trk);
+        demo.albums.push_back(alb);
+        demo.totalTracks = 1;
+        lib.artists.push_back(demo);
+        lib.totalTracks = 1; lib.totalAlbums = 1;
+        return lib;
+    }
+
+    // Extract all artist entries from index groups
+    std::vector<std::string> artistEntries;
+    size_t pos = 0;
+    while (true) {
+        auto found = artistsJson.find("\"artist\":[", pos);
+        if (found == std::string::npos) break;
+        auto arr = naviJsonArray(artistsJson.substr(found), "artist");
+        for (auto& a : arr) artistEntries.push_back(a);
+        pos = found + 10;
+    }
+
+    PLANETARY_LOG("[Planetary] Found %zu artists", artistEntries.size());
+    int totalArtists = (int)artistEntries.size();
+    int processed = 0;
+
+    for (auto& aJson : artistEntries) {
+        std::string artistId = naviJsonStr(aJson, "id");
+        std::string artistName = naviJsonStr(aJson, "name");
+        if (artistId.empty() || artistName.empty()) { processed++; continue; }
+
+        ArtistData artist;
+        artist.name = artistName;
+
+        std::string albumsJson = planetaryHttpGet(naviUrl("getArtist", "id=" + artistId));
+        auto albumEntries = naviJsonArray(albumsJson, "album");
+
+        for (auto& albJson : albumEntries) {
+            std::string albumId = naviJsonStr(albJson, "id");
+            if (albumId.empty()) continue;
+
+            AlbumData album;
+            album.name = naviJsonStr(albJson, "name");
+            if (album.name.empty()) album.name = "Unknown Album";
+            album.id = albumId;
+            album.artist = artistName;
+            album.year = naviJsonInt(albJson, "year");
+
+            std::string tracksJson = planetaryHttpGet(naviUrl("getAlbum", "id=" + albumId));
+            auto trackEntries = naviJsonArray(tracksJson, "song");
+
+            for (auto& tJson : trackEntries) {
+                std::string trackId = naviJsonStr(tJson, "id");
+                if (trackId.empty()) continue;
+
+                TrackData track;
+                track.id = trackId;
+                track.filePath = naviUrl("stream", "id=" + trackId + "&maxBitRate=320&format=mp3");
+                track.title = naviJsonStr(tJson, "title");
+                if (track.title.empty()) track.title = "Unknown Track";
+                track.artist = naviJsonStr(tJson, "artist");
+                if (track.artist.empty()) track.artist = artistName;
+                track.album = album.name;
+                track.albumArtist = artistName;
+                track.trackNumber = naviJsonInt(tJson, "track");
+                track.duration = naviJsonFloat(tJson, "duration");
+                track.year = naviJsonInt(tJson, "year");
+                track.genre = naviJsonStr(tJson, "genre");
+
+                album.tracks.push_back(track);
+                artist.totalTracks++;
+                lib.totalTracks++;
+            }
+
+            if (!album.tracks.empty()) {
+                artist.albums.push_back(album);
+                lib.totalAlbums++;
+            }
+        }
+
+        std::sort(artist.albums.begin(), artist.albums.end(),
+            [](const AlbumData& a, const AlbumData& b) { return a.year < b.year; });
+
+        if (artist.totalTracks > 0) lib.artists.push_back(artist);
+
+        processed++;
+        if (progressCallback) progressCallback(processed, totalArtists);
+    }
+
+    std::sort(lib.artists.begin(), lib.artists.end(),
+        [](const ArtistData& a, const ArtistData& b) { return a.name < b.name; });
+
+    PLANETARY_LOG("[Planetary] Library loaded: %zu artists, %d albums, %d tracks",
+        lib.artists.size(), lib.totalAlbums, lib.totalTracks);
+    return lib;
+}
+
+#endif // __ANDROID__

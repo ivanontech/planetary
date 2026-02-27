@@ -1,22 +1,26 @@
 #pragma once
 
-#ifdef __ANDROID__
+// Android-specific shader.h — uses GLES3 instead of GLEW/OpenGL
 #include <GLES3/gl3.h>
-#else
-#include <GL/glew.h>
-#endif
 #include <string>
-#include <fstream>
 #include <sstream>
 #include <iostream>
+#include <android/asset_manager.h>
+#include <android/log.h>
+
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "Planetary", __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "Planetary", __VA_ARGS__)
+
+// Android asset manager — set from JNI before use
+extern AAssetManager* g_assetManager;
 
 class Shader {
 public:
     GLuint id = 0;
 
     bool load(const std::string& vertPath, const std::string& fragPath) {
-        std::string vertSrc = readFile(vertPath);
-        std::string fragSrc = readFile(fragPath);
+        std::string vertSrc = readAsset(vertPath);
+        std::string fragSrc = readAsset(fragPath);
         if (vertSrc.empty() || fragSrc.empty()) return false;
 
         GLuint vert = compile(GL_VERTEX_SHADER, vertSrc);
@@ -33,7 +37,7 @@ public:
         if (!ok) {
             char log[512];
             glGetProgramInfoLog(id, 512, nullptr, log);
-            std::cerr << "[Shader] Link error: " << log << std::endl;
+            LOGE("[Shader] Link error: %s", log);
             return false;
         }
 
@@ -64,15 +68,22 @@ public:
     }
 
 private:
-    std::string readFile(const std::string& path) {
-        std::ifstream f(path);
-        if (!f.is_open()) {
-            std::cerr << "[Shader] Cannot open: " << path << std::endl;
+    // Read shader source from Android assets
+    std::string readAsset(const std::string& path) {
+        if (!g_assetManager) {
+            LOGE("[Shader] Asset manager not set!");
             return "";
         }
-        std::stringstream ss;
-        ss << f.rdbuf();
-        return ss.str();
+        AAsset* asset = AAssetManager_open(g_assetManager, path.c_str(), AASSET_MODE_BUFFER);
+        if (!asset) {
+            LOGE("[Shader] Cannot open asset: %s", path.c_str());
+            return "";
+        }
+        size_t size = AAsset_getLength(asset);
+        std::string content(size, '\0');
+        AAsset_read(asset, &content[0], size);
+        AAsset_close(asset);
+        return content;
     }
 
     GLuint compile(GLenum type, const std::string& src) {
@@ -85,7 +96,7 @@ private:
         if (!ok) {
             char log[512];
             glGetShaderInfoLog(s, 512, nullptr, log);
-            std::cerr << "[Shader] Compile error: " << log << std::endl;
+            LOGE("[Shader] Compile error: %s", log);
             return 0;
         }
         return s;

@@ -100,6 +100,7 @@ elseif(APPLE)
         ${GLEW_INCLUDE_DIRS}
         ${TAGLIB_INCLUDE_DIRS}
         ${OPENGL_INCLUDE_DIR}
+        /opt/homebrew/include
         src/
     )
 
